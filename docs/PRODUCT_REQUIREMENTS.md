@@ -1,7 +1,7 @@
 # AXIOM 产品需求说明（PRD）
 
 > 版本 v0.3 · 2026-11-05 · **目标需求，而非已完成的功能**  
-> 当前实际进度请以 [README](../README.md) 和 [本地开发说明](DEVELOPMENT.md) 为准。
+> 当前实际进度请以 [README](../README.md) 和 [本地验收记录](AXIOM_VALIDATION.md) 为准。
 
 ## 1. 产品定位
 

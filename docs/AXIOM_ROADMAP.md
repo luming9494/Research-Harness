@@ -6,19 +6,19 @@
 
 | 阶段 | 现状 | 接下来的判定标准 |
 | --- | --- | --- |
-| 新底座 | **Pi 源码已存在**，AXIOM Tiny 领域源码和 Python 例子已迁入 | `npm ci`、`npm run build`、原生 Pi TUI 正常 |
-| WP-01 | 已迁入任务和评估器代码；旧仓库曾通过 | 在新仓库 CPU 上重新训练与独立评价 |
-| WP-02 | 原生 Pi Tiny Extension 已编写；新仓库未验收 | 实际模型 Tool Calling、隔离编辑、Smoke、拒绝越界 |
-| WP-03 | 单轮优化 Controller 已迁入；新仓库未验收 | Agent 自主提出候选、训练、Validation keep/revert |
+| 新底座 | 本地完整构建、静态检查、离线 CLI RPC 启动通过 | 交互 TUI 人工验收仍待执行 |
+| WP-01 | 独立 `.venv` 下真实 CPU 训练、Checkpoint 重载和评估回归通过 | 保持可复验回归 |
+| WP-02 | 原生 Session/faux 工具注册、权限、Smoke、取消和恢复通过 | 真实模型 Tool Calling 待批准 API 后验证 |
+| WP-03 | 人工候选的真实训练、独立验证、keep 与失败 revert 通过 | 不将人工候选验收称作模型自主优化 |
 | WP-04 | **旧本地版本未推送，尚未迁移** | 基于原生 Pi 的多轮 TaskSpec、Budget、最佳模型交付 |
-| WP-05 | 未完成 | 取消、失败交付、状态恢复、系统评测 |
+| WP-05 | 本地取消与失败回退已有回归；未完整实现 | 跨会话状态恢复、持久交付、系统评测 |
 | 后续 | 未完成 | Ablate、Reproduce、远程 GPU Runner |
 
 ## 最近优先级
 
-1. **P0：本地可编译**。验证新 Pi 源码与 AXIOM TS/Python 完全兼容；消除接口和构建错误。
-2. **P0：原生 Pi 入口**。从 TUI 的 `/axiom-tiny` 跑通首次 Tool Calling，而不是重新写 readline。
-3. **P0：业务回归**。独立评估和决策不能退化；不允许通过测试集作弊。
+1. **P0：维持本地基座**。完整构建、`npm run check` 和 `npm run test:ml` 必须通过，详见 [验收记录](AXIOM_VALIDATION.md)。
+2. **P0：真实模型验收**。批准费用后从交互 TUI `/axiom-tiny` 验证模型自主候选，不重新写 readline。
+3. **P0：业务回归**。保持独立评估、取消、工具恢复和失败交付；不允许通过测试集作弊。
 4. **P1：补齐 WP-04 源码**。获取旧本地未推送版本，抽出领域内核、不要复制 Pi 已有的模型回退和 Session 管理。
 5. **P1：预算与恢复可靠性**。停止条件由代码执行，模型只决策候选；仅使用可信 Tiny Task 做 CPU 验收。
 6. **P2：更多 ML 模式**。先 Ablate 小型实验，再 Reproduce 运行/评估复现，最后 GPU 长任务。

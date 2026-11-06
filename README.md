@@ -2,7 +2,7 @@
 
 **基于固定版本 Pi 1.5.0 源码开发的自主机器学习工程 Agent。**
 
-> **当前状态：迁移中的开发版本。** 新仓库以完整 Pi 源码为基础，已迁入原 AXIOM 公开仓库的 Tiny PyTorch 任务、真实训练与独立验证、候选代码审查、单轮模型优化及基础实验数据处理。新增原生 Pi Extension 入口，但**尚未在新仓库完成本地构建、模型 API 或端到端重新验收**。之前 WP-04 的多轮预算/NIM 功能主要在旧电脑本地且未推送，**目前不在这个仓库中**。
+> **当前状态：原生基座已通过本地无费用回归。** 完整构建、静态检查、Tiny PyTorch 真实训练与独立验证、原生 Pi Session 工具链、权限与取消回归已验证。Session 集成使用离线 faux provider 和人工候选，不代表真实模型自主优化已验收；交互 TUI 和收费模型 API 仍待批准后验证。之前 WP-04 的多轮预算/NIM 功能**目前不在这个仓库中**。详见 [本地验收记录](docs/AXIOM_VALIDATION.md)。
 
 ## 为什么重新基于 Pi 源码开发？
 
@@ -41,7 +41,7 @@ Research-Harness/
 │               │   └── single-optimize.ts  # 单轮优化、客观 keep/revert
 │               ├── research.ts             # 实验清单/指标来源校验
 │               └── table.ts                # Markdown/CSV/LaTeX 导出
-├── .pi/extensions/
+├── axiom/extensions/
 │   └── axiom-tiny.ts           # Pi 原生 Tiny Task 命令与工具桥接
 ├── examples/
 │   ├── tiny-ml-task/           # 固定合成基线模型
@@ -65,21 +65,22 @@ Research-Harness/
 ~~~powershell
 git clone https://github.com/luming9494/Research-Harness.git
 cd Research-Harness
-npm ci
+npm ci --ignore-scripts
 npm run build
 
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r examples\tiny-ml-eval\requirements-cpu.txt
 
-# 无需 LLM/GPU 的测试：先验证任务底座
-.\.venv\Scripts\python.exe -m unittest discover -s tests\python -v
-node --test tests\axiom\decision.test.mjs tests\axiom\single-optimize.test.mjs tests\axiom\smoke-permissions.test.mjs
+# 无需 API/GPU：Python、Node 控制器和 Pi Session 集成回归
+npm run test:ml
 
-# 使用 Pi 原生终端，regular 模式方便回看历史输出
-node packages\coding-agent\dist\bundle\cli.js --tui-mode regular
+# 当前仓库编译出的 Pi，显式加载 AXIOM；不改变全局安装的 pi
+npm run axiom -- --tui-mode regular
 ~~~
 
-进入 Pi 后输入：
+全局 `pi` 继续用于开发，不自动加载 AXIOM。`npm run axiom` 使用 Pi 自带的 TypeScript 扩展加载器加载仓库领域源码，修改领域代码后仍应重新构建并跑测试。
+
+进入 AXIOM 启动的 Pi 后输入：
 
 ~~~text
 /axiom-tiny
@@ -107,8 +108,8 @@ node packages\coding-agent\dist\bundle\cli.js --tui-mode regular
 
 ## 下一步开发重点
 
-1. **先重新跑通新仓库的完整构建与无模型回归**，修复 Pi Monorepo 内的 TypeScript/扩展兼容问题；
-2. **验收原生 Pi TUI → AXIOM 工具 → 真实 Python 训练 → 结果交付**；
+1. 保持完整构建、静态检查和 `npm run test:ml` 回归通过；
+2. 在用户批准 API 范围与费用后，验收交互 TUI 与真实模型自主 Tool Calling；
 3. 从旧电脑本地按模块恢复尚未推送的 WP-04 **多轮 Experiment Loop、预算控制与任务交付**，不迁移旧 readline/Session/模型路由包装；
 4. 使用 Pi 原生模型目录配置 NIM / DeepSeek；不直接恢复旧的自定义 streamFunction 回退；
 5. 完善取消、恢复、失败交付与 T1/T2 评测，再扩展 Ablate / Reproduce / GPU Runner。

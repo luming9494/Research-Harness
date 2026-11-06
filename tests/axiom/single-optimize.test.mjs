@@ -100,6 +100,20 @@ test("candidate failure can safely revert and cannot auto retry", async (t) => {
   assert.deepEqual(trained, ["baseline", "candidate"]);
 });
 
+test("failed Smoke can deliver baseline without another training attempt", async (t) => {
+  const { controller, trained, exported } = await createController(t);
+  await controller.invoke("run_baseline", {}, "test");
+  await controller.invoke("edit_candidate_file", { path: "model.py", expectedSha256: "old", content: "new", rationale: "offline fixture" }, "test");
+  controller.workspace.invoke = async () => { throw new Error("simulated Smoke failure"); };
+  await assert.rejects(controller.invoke("run_checks", { action: "smoke" }, "test"), /Smoke failure/);
+  await assert.rejects(controller.invoke("run_candidate", {}, "test"), /Smoke/);
+  await controller.invoke("get_run_result", {}, "test");
+  const result = await controller.invoke("finalize_candidate", { choice: "revert", reason: "Smoke failed" }, "test");
+  assert.equal(result.outcome, "candidate_failed");
+  assert.deepEqual(trained, ["baseline"]);
+  assert.deepEqual(exported, ["baseline"]);
+});
+
 test("arbitrary commands and final-test overrides fail closed", async (t) => {
   const { controller, trained } = await createController(t);
   for (const [name, input] of [

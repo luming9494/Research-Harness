@@ -8,7 +8,7 @@
 - 四个二维高斯簇组成非线性二分类；train / validation / final-test 分别使用独立固定种子。
 - 数据量：1024 / 512 / 512，类别平衡；运行时生成，不联网下载。
 - Baseline：`model.py` 中的线性分类器，6 个参数。
-- 允许候选修改：`model.py` 与 `config.json`；模型输出必须是 `[batch, 2]` logits，参数不超过 1024。
+- WP-01 离线脚本允许可信候选修改 `model.py` 与 `config.json`；原生 `/axiom-tiny` 控制器进一步限制为只改 `model.py`、固定配置。模型输出必须是 `[batch, 2]` logits，参数不超过 1024。
 - 配置仅允许 epochs（1–120）、learning_rate（0.0001–0.1）、seed；任务与评估器不能作为候选修改。
 - 正式目标：`full` 协议训练后，独立 final-test accuracy ≥ 0.95。
 - 禁止额外数据、预训练权重、测试集调参、修改评估器、运行中安装依赖或联网。
@@ -30,7 +30,7 @@ python -m pip install -r examples/tiny-ml-eval/requirements-cpu.txt --index-url 
 
 依赖安装需要网络；训练与评估不需要。`requirements-cpu.txt` 固定核心 PyTorch 版本，不是全依赖锁文件。
 
-本次本机验证使用 Python 3.11.9 / torch 2.2.0+cpu。为了不下载或修改全局依赖，本地 `.venv` 使用 `uv venv --system-site-packages` 创建，复用了既有 Torch；**这不是依赖完全隔离的全新安装验证**。若不激活环境，可将以下 `python` 换成 `.venv/Scripts/python.exe`。
+当前新仓库本地验收使用 Python 3.11.9 / torch 2.2.0，在 `python -m venv .venv` 创建的独立环境安装，没有复用全局 site-packages。固定 NumPy 1.26.4 以兼容 Torch 2.2 的 NumPy 接口。若不激活环境，可将以下 `python` 换成 `.venv/Scripts/python.exe`。
 
 ## 运行 L0 和 L1
 
@@ -83,7 +83,7 @@ python examples/tiny-ml-eval/judge.py --run private/tiny-demo/reference --output
 
 当前 final-test 数据是公开生成的，不是攻击者不可访问的隐藏测试；脚本也尚未实现最终测试只准调用一次的门禁。独立评估用于可信样例，后续接 Agent 时需由 Controller 隔离最终反馈并限制访问。
 
-## 本机实测校准（2026-11-05）
+## 迁移前历史校准（2026-11-05）
 
 使用默认 seed 42、80 epochs（Smoke 为 2 epochs）：
 
@@ -95,7 +95,7 @@ python examples/tiny-ml-eval/judge.py --run private/tiny-demo/reference --output
 
 这是该机器上的单次校准，不是 Agent 成功率或通用性能指标。训练进程时间包括 Python/Torch 启动；`run.json.wall_seconds` 从训练函数入口计时，不包含 Python 导入；两者不能当作精确 CPU 时间。首次优化器初始化开销明显，不能拿热进程训练耗时冒充完整命令耗时。
 
-本次完整校准产物位于本机被忽略的 `private/tiny-task-wp01-v1/`，包含独立验证结果、参考模型判题和 `calibration.json`。早期开发产物可能因评估代码更新而校验失败，应另建 Run 重跑，不能修改旧哈希来绕过检查。
+旧工程当时的校准目录为 `private/tiny-task-wp01-v1/`，不代表该目录已迁入当前仓库。当前新仓库产物位置见 [本地验收](../../docs/AXIOM_VALIDATION.md)。早期开发产物可能因评估代码更新而校验失败，应另建 Run 重跑，不能修改旧哈希来绕过检查。
 
 ## 测试
 
@@ -106,13 +106,12 @@ npm run test:ml
 python -m unittest discover -s tests/python -v
 ```
 
-覆盖真实训练、模型重载、确定性、数据切分、配置拒绝、指标独立重算、源文件/权重变更、输出防覆盖以及 Proxy/Smoke 的正式成绩限制。测试只在临时目录写入产物，不调用 LLM。
+覆盖真实训练、模型重载、确定性、数据切分、配置拒绝、指标独立重算、源文件/权重变更、输出防覆盖以及 Proxy/Smoke 的正式成绩限制。Python 回归使用临时目录；Pi 集成将完整真实训练证据保留在忽略的 `private/` 中。不调用真实模型 API。
 
 ## 当前限制与下一步
 
-- 还没有 Agent 工具调用、候选自动修改、Experiment Controller 或跨实验优化。
-- JSON 中的候选数/墙钟预算是下一阶段的控制器约定，当前脚本**不执行预算门禁**。
-- 文件白名单只约束未来编辑入口；执行 `model.py` 仍是任意 Python 执行，**不是沙箱**。
+- 这里的脚本是可信代码的离线训练/判题入口；原生 Pi 集成、单候选控制器和本地进程取消已另外实现并通过回归，见 [本地验收](../../docs/AXIOM_VALIDATION.md)。
+- 原生流程目前固定一个候选、一次完整候选训练和最多 32 次工具操作；没有 WP-04 的跨实验循环或完整墙钟/Token/GPU 预算。
+- 原生入口使用窄 AST 审查和受控文件/命令白名单，不是 OS 沙箱。直接调用这些 Python 脚本仍会执行 `model.py`。
 - 不要对未知候选执行这些脚本，不要在带敏感凭据的环境中运行不可信代码。
-- 未实现自动进程树取消、独立 Runner、远程 GPU 或故障恢复。
-- 本任务只提供可信公开代码的训练/判题基础；下一步是 WP-02 的真实 Pi 工具接入验证。
+- 尚未实现跨会话实验恢复、远程 GPU 或独立持久 Runner；真实模型自主候选和交互 TUI 验收仍待执行。

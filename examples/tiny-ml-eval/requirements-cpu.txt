@@ -1,3 +1,5 @@
 # Install in an isolated Python 3.11 environment using the official CPU wheel index.
 # See ../tiny-ml-task/README.md. No third-party dataset packages are required.
 torch==2.2.0
+# Torch 2.2 predates NumPy 2; keep its optional NumPy bridge compatible.
+numpy==1.26.4

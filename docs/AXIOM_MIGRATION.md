@@ -21,10 +21,10 @@
 | `src/research.ts` 与 `src/table.ts` | `packages/coding-agent/src/axiom/` | 实验清单和数据表输出 |
 | `examples/tiny-ml-*` | 根目录 `examples/tiny-ml-*` | PyTorch 合成任务、评估/审查脚本 |
 | `tests/python` / `tests/fixtures` | 根目录对应路径 | Python 回归与合成参考结构 |
-| 原 Agent 工具编排 | `.pi/extensions/axiom-tiny.ts` | **新写的 Pi 原生桥接**，未复制重复 SDK 初始化 |
+| 原 Agent 工具编排 | `axiom/extensions/axiom-tiny.ts` | **新写的 Pi 原生桥接**，未复制重复 SDK 初始化 |
 | 新版 Node 策略测试 | `tests/axiom/decision.test.mjs` | 单轮决策确定性测试 |
 
-由于 Pi 的 TypeScript 配置采用 `erasableSyntaxOnly`，迁入的两处构造器参数属性已改写为普通字段初始化；业务规则与训练决策不应因此改变。
+由于 Pi 的 TypeScript 配置采用 `erasableSyntaxOnly`，迁入的两处构造器参数属性已改写为普通字段初始化。源码相对导入现已统一为 `.ts`，由构建转换为 `.js`，并修复迁入模块的格式与检查诊断。
 
 ## 3. 未迁移，不要误判为已经恢复
 
@@ -40,16 +40,16 @@
 
 **仍不是 OS 沙箱**：Pi 扩展/用户账号具备本地进程权限，不能用这套 Tiny 安全策略运行来源不明的训练仓库。训练与来源 SHA、AST 策略适用于固定可信任务。
 
-`/axiom-stop`：退出 Tiny 模式，恢复 Pi 原本工具选择；不会把已运行的长时外部 GPU Job 当作已取消。
+`/axiom-stop`：中止当前受控执行器和 Pi Agent turn，等待结束后恢复原工具选择；`session_shutdown` 同样取消待执行/运行中的任务。没有远程 GPU Job 取消能力，也没有跨会话恢复实验控制器的能力。扩展放在自动发现目录以外，仅 `npm run axiom` 显式加载，开发工具 `pi` 不依赖 AXIOM 构建。
 
-## 5. 新仓库验收清单（尚未在本次远端操作中实际运行）
+## 5. 新仓库本地验收
 
 ~~~powershell
-npm ci
+npm ci --ignore-scripts
 npm run build
-.\.venv\Scripts\python.exe -m unittest discover -s tests\python -v
-node --test tests\axiom\decision.test.mjs tests\axiom\single-optimize.test.mjs tests\axiom\smoke-permissions.test.mjs
-node packages\coding-agent\dist\bundle\cli.js --tui-mode regular
+npm run check
+npm run test:ml
+npm run axiom -- --tui-mode regular
 ~~~
 
 进入原生 Pi：
@@ -60,7 +60,7 @@ node packages\coding-agent\dist\bundle\cli.js --tui-mode regular
 
 确认出现 Tiny Task 工作目录，要求 Agent 先读取 model.py 和 baseline，再提交单个方案，训练并交付 `selected/`、`decision.json` 与 `patch.diff`。用系统生成文件作为真实依据，不以 LLM 自述为验收结论。
 
-由于本次操作通过 GitHub API 迁移、无法访问你的 Windows 项目环境，**上述测试与模型请求并未实际执行**。首次本地运行应按实际错误修正代码。
+本地 Windows 已通过构建、静态检查、Python 真实训练、Node 策略和 Pi Session 集成回归，以及编译后 CLI 的离线 RPC 命令发现。集成使用 Pi 现有 faux provider 与人工候选，未调用收费 API；实际交互 TUI、真实模型自主提出候选仍未验收。测试范围与真实产物说明见 [AXIOM_VALIDATION.md](AXIOM_VALIDATION.md)。
 
 ## 6. WP-04 本地代码以后怎么导入？
 

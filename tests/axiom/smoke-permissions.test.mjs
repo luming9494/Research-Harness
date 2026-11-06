@@ -45,6 +45,21 @@ test("training process environment is not inherited wholesale", () => {
   } finally { delete process.env.AXIOM_PRIVATE_TEST_TOKEN; }
 });
 
+test("restricted process honors cancellation and timeout", async () => {
+  const options = { cwd: resolve("."), home: resolve("."), timeoutMs: 10000 };
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(runProcess(process.execPath, ["-e", "process.exit(99)"], { ...options, signal: aborted.signal }), /abort/i);
+  const cancellation = new AbortController();
+  const pending = runProcess(process.execPath, ["-e", "setInterval(()=>{},1000)"], { ...options, signal: cancellation.signal });
+  const timer = setTimeout(() => cancellation.abort(), 300);
+  try {
+    assert.equal((await pending).stopped, "aborted");
+  } finally { clearTimeout(timer); }
+  const timeout = await runProcess(process.execPath, ["-e", "setInterval(()=>{},1000)"], { ...options, timeoutMs: 300 });
+  assert.equal(timeout.stopped, "timeout");
+});
+
 test("restricted process captures nonzero exit and caps stdout", async () => {
   const options = { cwd: resolve("."), home: resolve("."), timeoutMs: 10000 };
   const failure = await runProcess(process.execPath, ["-e", "console.log('real-output'); process.exit(7)"], options);

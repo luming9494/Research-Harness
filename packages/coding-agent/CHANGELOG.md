@@ -21,6 +21,9 @@
 
 ### Fixed
 
+- AXIOM Tiny Task now loads explicitly through `npm run axiom` rather than project extension auto-discovery, so the development Pi does not depend on the AXIOM build. Stopping or unloading the task cancels pending executors before restoring the prior tool selection.
+- AXIOM single-candidate optimization now returns independently reloaded Smoke evidence and permits baseline delivery after a failed Smoke attempt.
+- Fixed migrated AXIOM modules using relative `.js` imports incompatible with the monorepo source checks.
 - Fixed the bash tool reporting only `Command timed out` when the command had already exited but a background process it started kept writing to its output until the timeout. The error now also reports the shell's exit code and when it exited ([#11613](https://github.com/earendil-works/pi/issues/11613))
 - Images in steering and follow-up messages, including `prompt()` while streaming, are now resized like images in idle prompts instead of being sent and saved at full size ([#11738](https://github.com/earendil-works/pi/issues/11738))
 - A failed token refresh of an MCP connection no longer registers an OAuth client or replaces the PKCE verifier of a sign-in in progress, which made that sign-in fail. MCP sign-in now refreshes the stored tokens with the stored client even when the loopback callback port changed, instead of registering a new client and opening the browser. Ctrl+C in `/mcp` and the `--timeout` of `pi mcp login` now also stop a sign-in while it waits up to 25 seconds for another pi process's token refresh, and a refresh lock that fails for another reason than that wait now fails the sign-in instead of opening the browser.

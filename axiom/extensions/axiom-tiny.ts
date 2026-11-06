@@ -12,8 +12,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { SmokeWorkspace } from "../../packages/coding-agent/dist/axiom/execution/smoke-workspace.js";
-import { SingleOptimize } from "../../packages/coding-agent/dist/axiom/execution/single-optimize.js";
+import { SmokeWorkspace } from "../../packages/coding-agent/src/axiom/execution/smoke-workspace.ts";
+import { SingleOptimize } from "../../packages/coding-agent/src/axiom/execution/single-optimize.ts";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -81,6 +81,19 @@ export default function (pi: ExtensionAPI) {
   let active = false;
   let toolsRegistered = false;
   let previouslyActive: string[] = [];
+  let taskAbort: AbortController | undefined;
+  const pending = new Set<Promise<unknown>>();
+
+  // Keep the restricted tool gate closed until every cancelled executor has settled.
+  const stopTask = async () => {
+    taskAbort?.abort();
+    await Promise.allSettled([...pending]);
+    if (active) pi.setActiveTools(previouslyActive);
+    active = false;
+    taskAbort = undefined;
+  };
+
+  pi.on("session_shutdown", stopTask);
 
   // Defense in depth: stop other Pi tools from being used by the model
   // while a restricted Tiny Task is active. NOT an OS security boundary.
@@ -93,6 +106,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("axiom-tiny", {
     description: "Start supervised Tiny ML Optimize task using reviewed Python scripts",
     handler: async (_args, ctx) => {
+      await ctx.waitForIdle();
       if (active) {
         ctx.ui.notify("AXIOM Tiny Task already active in " + controller?.workspace.root, "info");
         return;
@@ -114,6 +128,7 @@ export default function (pi: ExtensionAPI) {
       const task = new SingleOptimize(workspace);
       await task.initialize();
       controller = task;
+      taskAbort = new AbortController();
 
       if (!toolsRegistered) {
         for (const spec of specs) {
@@ -125,9 +140,17 @@ export default function (pi: ExtensionAPI) {
             executionMode: "sequential",
             parameters: spec.parameters,
             async execute(_id, params, signal) {
-              if (!active || !controller) throw new Error("First start /axiom-tiny");
-              const result = await controller.invoke(spec.name, params as Record<string, unknown>, "model", signal);
-              return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+              if (!active || !controller || !taskAbort) throw new Error("First start /axiom-tiny");
+              const executionSignal = signal ? AbortSignal.any([signal, taskAbort.signal]) : taskAbort.signal;
+              const workspace = controller.workspace.root;
+              const execution = controller.invoke(spec.name, params as Record<string, unknown>, "model", executionSignal);
+              pending.add(execution);
+              try {
+                const result = { ...await execution, workspace };
+                return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+              } finally {
+                pending.delete(execution);
+              }
             },
           });
         }
@@ -152,8 +175,10 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("No AXIOM Tiny Task is active.", "info");
         return;
       }
-      active = false;
-      pi.setActiveTools(previouslyActive);
+      taskAbort?.abort();
+      ctx.abort();
+      await ctx.waitForIdle();
+      await stopTask();
       ctx.ui.notify("AXIOM mode ended. Artifacts remain at " + controller?.workspace.root, "info");
     },
   });

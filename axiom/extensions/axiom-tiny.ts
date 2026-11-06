@@ -14,6 +14,7 @@ import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SmokeWorkspace } from "../../packages/coding-agent/src/axiom/execution/smoke-workspace.ts";
 import { SingleOptimize } from "../../packages/coding-agent/src/axiom/execution/single-optimize.ts";
+import { registerTaskExtension } from "./axiom-task.ts";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -79,6 +80,7 @@ const allowed = new Set<string>(allowedNames);
 export default function (pi: ExtensionAPI) {
   let controller: SingleOptimize | undefined;
   let active = false;
+  const multiRound = registerTaskExtension(pi, () => active);
   let toolsRegistered = false;
   let previouslyActive: string[] = [];
   let taskAbort: AbortController | undefined;
@@ -107,8 +109,8 @@ export default function (pi: ExtensionAPI) {
     description: "Start supervised Tiny ML Optimize task using reviewed Python scripts",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
-      if (active) {
-        ctx.ui.notify("AXIOM Tiny Task already active in " + controller?.workspace.root, "info");
+      if (active || multiRound.isActive()) {
+        ctx.ui.notify("An AXIOM task is already active; stop it before switching modes.", "info");
         return;
       }
       if (!ctx.hasUI) throw new Error("AXIOM Tiny Task requires interactive user confirmation");

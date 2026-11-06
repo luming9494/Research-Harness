@@ -409,6 +409,32 @@ async function streamAssistantResponse(
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
 
+	// Context/request hooks can cancel admission. Do not invoke a provider with an already-aborted signal.
+	if (signal?.aborted) {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: config.model.api,
+			provider: config.model.provider,
+			model: config.model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "aborted",
+			errorMessage: "Operation aborted before provider request",
+			timestamp: Date.now(),
+		};
+		context.messages.push(message);
+		await emit({ type: "message_start", message });
+		await emit({ type: "message_end", message });
+		return message;
+	}
+
 	const response = await streamFunction(config.model, llmContext, {
 		...config,
 		apiKey: resolvedApiKey,

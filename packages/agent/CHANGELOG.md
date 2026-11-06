@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Do not invoke the provider when request/context hooks have already aborted the agent signal; emit an aborted assistant result instead.
+
 ## [1.5.0] - 2026-11-02
 
 ### Breaking Changes

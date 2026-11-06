@@ -11,7 +11,7 @@
 - 所有未发表研究、真实日志/权重、凭据和本机私有目录严格不进入公开仓库。
 - **不可将“代码已复制”与“端到端已验收通过”混为一谈**。
 
-## 2. 已提交的独立部分
+## 2. 已迁入的独立部分（不表示本轮已 Git commit）
 
 | 原 AXIOM 模块 | 新工程路径 | 说明 |
 | --- | --- | --- |
@@ -23,12 +23,17 @@
 | `tests/python` / `tests/fixtures` | 根目录对应路径 | Python 回归与合成参考结构 |
 | 原 Agent 工具编排 | `axiom/extensions/axiom-tiny.ts` | **新写的 Pi 原生桥接**，未复制重复 SDK 初始化 |
 | 新版 Node 策略测试 | `tests/axiom/decision.test.mjs` | 单轮决策确定性测试 |
+| 本地 `src/execution/task-spec.ts`、`task-budget.ts` | `packages/coding-agent/src/axiom/execution/task-{spec,budget}.ts` | 固定 TaskSpec、原子训练预算准入、原生 usage 结算 |
+| 本地 `task-executor.ts`、`task-controller.ts` | `packages/coding-agent/src/axiom/execution/task-{executor,controller}.ts` | 可信 CPU worker、AST 去重、独立验证、历史最佳、串行取消和确定性交付；Controller 改为原生工具驱动，不迁旧 propose/模型循环 |
+| 本地 `examples/tiny-ml-eval/experiment.py` | 同名路径 | 固定 AST 审查、Smoke/full 训练 worker，继续用现有 `validate_only.py` 独立评估 |
+| 本地 WP-04 测试中的场景 | `tests/axiom/task-{controller,cpu}.test.mjs`、`packages/coding-agent/test/suite/axiom-task.test.ts` | 领域单测、真实 CPU 多轮、原生 Pi/faux 工具及 usage/取消集成 |
+| 原 WP-04 Agent 编排 | `axiom/extensions/axiom-task.ts` | 新写 Extension，接现有 Session 与四个领域工具，不复制旧 `task-agent.ts` / `task-decision.ts` |
 
 由于 Pi 的 TypeScript 配置采用 `erasableSyntaxOnly`，迁入的两处构造器参数属性已改写为普通字段初始化。源码相对导入现已统一为 `.ts`，由构建转换为 `.js`，并修复迁入模块的格式与检查诊断。
 
 ## 3. 未迁移，不要误判为已经恢复
 
-- 旧 AXIOM 的 **WP-04 多轮候选、TaskSpec、预算控制、交付整合**：最新版本仍停留在用户本地、尚未进入旧公开 GitHub。
+- WP-04 的旧独立 Agent/模型请求包装：**刻意不迁移**。多轮 TaskSpec、预算、CPU 执行与历史最佳领域能力已从本地源码迁入；真实模型自主实验仍未验收。
 - **NVIDIA NIM** 多轮 Function Calling 与 **NIM → DeepSeek** 供应商回退代码：本地版本尚未推送。本次不重写 Pi 的模型配置/路由。
 - 旧 `src/agent/smoke-agent.ts`、`optimize-agent.ts`、`src/cli.ts`、`src/agent.ts` 的 Session 初始化、事件订阅、readline 与供应商封装：**刻意不迁移**，避免重复实现 Pi。
 - 原来的 React Web 离线前端：暂缓，不属于新的 CLI 主线。
@@ -39,6 +44,10 @@
 `/axiom-tiny`：在 Pi 原生会话中，通过人工同意创建受控 Tiny Task，暂时只开放九个 namespaced ML 工具；自动禁用普通 Pi 工具以便不绕过限定的任务动作。
 
 **仍不是 OS 沙箱**：Pi 扩展/用户账号具备本地进程权限，不能用这套 Tiny 安全策略运行来源不明的训练仓库。训练与来源 SHA、AST 策略适用于固定可信任务。
+
+`/axiom-task`：用户审批不可由模型修改的 TaskSpec，仅开放四个多轮 ML 工具。候选同步等待训练，不持续请求模型轮询；按原生 Pi usage 结算 Token。程序执行次数、墙钟、训练步骤与进程累计耗时预算、结构去重和历史最佳交付。请求前 Token 估算不是供应商绝对硬限额。
+
+`/axiom-task-stop`：取消多轮任务、阻止排队下一轮、交付已验证历史最佳，再恢复先前工具。与单候选模式互斥；达到预算或目标后由程序停止，不要求模型主动调用 finish。任务期间暂停自动/手工 compaction、树导航和缓存预热，避免相应辅助请求绕过任务 usage 路径。
 
 `/axiom-stop`：中止当前受控执行器和 Pi Agent turn，等待结束后恢复原工具选择；`session_shutdown` 同样取消待执行/运行中的任务。没有远程 GPU Job 取消能力，也没有跨会话恢复实验控制器的能力。扩展放在自动发现目录以外，仅 `npm run axiom` 显式加载，开发工具 `pi` 不依赖 AXIOM 构建。
 
@@ -62,17 +71,18 @@ npm run axiom -- --tui-mode regular
 
 本地 Windows 已通过构建、静态检查、Python 真实训练、Node 策略和 Pi Session 集成回归，以及编译后 CLI 的离线 RPC 命令发现。集成使用 Pi 现有 faux provider 与人工候选，未调用收费 API；实际交互 TUI、真实模型自主提出候选仍未验收。测试范围与真实产物说明见 [AXIOM_VALIDATION.md](AXIOM_VALIDATION.md)。
 
-## 6. WP-04 本地代码以后怎么导入？
+## 6. WP-04 本地源码核对与适配
 
-建议在旧项目先提交/备份未保存工作，然后**只迁移独立的 ML 业务实现**，而不是整个旧 `src/agent`。重点查找：
+本轮实际检查了 `D:\graduate_student\AXIOM\AXIOM`，读取其 `src/execution/task-{spec,budget,executor,controller}.ts`、`src/agent/task-{agent,decision}.ts`、WP-04 单元/CPU 集成测试和固定 `experiment.py`。旧目录未删除、未改写；不是根据旧公开 GitHub 或文档臆造功能。
 
-- 多轮 Experiment Controller、预算/Token/计算时间/实验次数；
-- 最佳候选选择、实验去重、结果目录/报告；
-- 对应 Python/Node 回归与真实验收材料。
+保留独立领域规则：严格 TaskSpec、CPU 预算、AST 架构指纹与配置/可信输入联合去重、独立 validation 选择、历史最佳哈希校验和无模型交付。适配内容：
 
-在新项目以当前 `packages/coding-agent/src/axiom/` 为承载位置，继续使用 Pi 原生 TUI 和模型配置。先迁移可测试的纯领域函数，再迁移工具交互，最后做模型供应商真实调用验证。
+- 旧同步 `executeTask(propose)` 改成串行 `TaskController.invoke`，由现有 Pi Agent Loop 自然进行多轮工具调用；取消立即关闭准入，再等待当前 worker。
+- 原子预留一次完整训练的实验次数和步骤，失败不退预留；拒绝启动时不先消耗实验次数。
+- 不迁旧 `piDecision` 的 Session 创建、消息拼装、模型/凭据注册及供应商 fallback。Token 直接接 Pi 上下文事件准入和 `message_end` usage，不以工具次数冒充 Token。
+- Pi 原生请求路径增加已取消 signal 的发出前检查，避免扩展取消准入后仍调用 provider；其余 Session/TUI/模型配置不另写。
 
-**不能仅从旧 GitHub 重建本地未提交的 WP-04 实现。** 旧代码必须先从你的电脑以提交或文件包形式提供，才可能完成逐函数迁移。
+当前仅做无费用回归和真实 CPU 校准。后续供应商/TUI 验收必须单独批准；跨会话恢复、远程 GPU 和 NIM 回退没有因此恢复。
 
 ## 7. Source licensing
 

@@ -2,7 +2,7 @@
 
 **基于固定版本 Pi 1.5.0 源码开发的自主机器学习工程 Agent。**
 
-> **当前状态：原生基座已通过本地无费用回归。** 完整构建、静态检查、Tiny PyTorch 真实训练与独立验证、原生 Pi Session 工具链、权限与取消回归已验证。Session 集成使用离线 faux provider 和人工候选，不代表真实模型自主优化已验收；交互 TUI 和收费模型 API 仍待批准后验证。之前 WP-04 的多轮预算/NIM 功能**目前不在这个仓库中**。详见 [本地验收记录](docs/AXIOM_VALIDATION.md)。
+> **当前状态：WP-04 可信 Tiny Task 多轮领域内核已迁入。** 原生 Pi 工具驱动多轮候选，程序执行预算、结构去重、独立 validation、历史最佳与失败交付；本地测试不调用收费 API。Session 集成使用 faux provider 和人工候选，不代表真实模型自主优化已验收；交互 TUI、真实供应商及 NIM 回退仍未验收。详见 [本地验收记录](docs/AXIOM_VALIDATION.md)。
 
 ## 为什么重新基于 Pi 源码开发？
 
@@ -19,13 +19,13 @@
 
 | 目标模式 | 典型输入 | 最终交付 | 状态 |
 | --- | --- | --- | --- |
-| **Optimize** 模型改进与课程打榜 | 基线代码、规则、训练数据、指标、预算 | 合法模型代码、权重、独立验证、实验总结 | Tiny Task 单候选已迁移，多轮尚未迁移 |
+| **Optimize** 模型改进与课程打榜 | 基线代码、规则、训练数据、指标、预算 | 合法模型代码、权重、独立验证、实验总结 | 可信 Tiny Task 单候选及多轮预算内核已迁入 |
 | **Reproduce** 论文复现 | 论文、GitHub 仓库、数据及复现协议 | Run / Evaluate / Train 复现级别、指标差距 | 规划中 |
 | **Ablate** 消融实验 | 基线、模块组合、已有实验和预算 | 消融组合、真实结果、配置和报告 | 规划中 |
 
 目标交互是：**自然语言任务 → 检查规则 → 规划候选 → 改代码 → 真训练/评估 → 根据客观结果迭代 → 按预算停止 → 交付模型与报告**。
 
-当前新仓库只迁移了 **WP-01～03 的公共代码**，不声称已经可以接管任意第三方训练仓库。原本在本地通过的 WP-04 多轮流程还需单独导入和移除重复 Pi 包装。
+当前支持 **WP-01～04 的可信 Tiny CPU 流程**，不声称可以接管任意第三方训练仓库。WP-04 已从本机旧源码抽取领域实现，未迁入旧 Session 工厂、readline、模型请求或供应商回退包装。
 
 ## 新源码在哪里？
 
@@ -38,11 +38,16 @@ Research-Harness/
 │               ├── execution/
 │               │   ├── process.ts           # 受控进程执行与输出限制
 │               │   ├── smoke-workspace.ts   # 隔离候选、白名单、AST 检查入口
-│               │   └── single-optimize.ts  # 单轮优化、客观 keep/revert
+│               │   ├── single-optimize.ts  # 单轮优化、客观 keep/revert
+│               │   ├── task-spec.ts         # 用户审批的固定规则与预算
+│               │   ├── task-budget.ts       # 实验/墙钟/步骤/进程耗时/Token
+│               │   ├── task-controller.ts   # 多轮、去重、历史最佳、停止与报告
+│               │   └── task-executor.ts     # 可信 CPU worker 与交付完整性
 │               ├── research.ts             # 实验清单/指标来源校验
 │               └── table.ts                # Markdown/CSV/LaTeX 导出
 ├── axiom/extensions/
-│   └── axiom-tiny.ts           # Pi 原生 Tiny Task 命令与工具桥接
+│   ├── axiom-tiny.ts           # 显式入口，保留单候选命令
+│   └── axiom-task.ts           # 原生多轮工具、usage 与生命周期桥接
 ├── examples/
 │   ├── tiny-ml-task/           # 固定合成基线模型
 │   ├── tiny-ml-eval/           # 训练、验证、判题与源码审查
@@ -56,7 +61,7 @@ Research-Harness/
     └── AXIOM_ROADMAP.md       # 下一步开发重点
 ~~~
 
-扩展入口**不创建新的 Pi Session、readline 或模型流包装**。单候选 ML 领域状态在 AXIOM 自己的 Controller 中；Pi 仍保存真正的会话。
+扩展入口**不创建新的 Pi Session、readline 或模型流包装**。单候选和多轮 ML 领域状态在 AXIOM 自己的 Controller 中；Pi 仍保存真正的会话。
 
 ## 在 Windows / VS Code 中体验（Tiny Task）
 
@@ -98,9 +103,23 @@ npm run axiom -- --tui-mode regular
 
 所有候选和训练产物写入本地忽略的 `private/`。**执行会调用你在 Pi 中选定的模型 API，并可能收费；训练会使用本机 CPU。**
 
+### WP-04 多轮任务
+
+在同一入口启动后输入 `/axiom-task`，审批默认规则：最多 **2 次独立候选训练**、墙钟 **600 秒**、训练步骤预留 **244**（Baseline 80 + 两次候选各 82）、受控子进程累计耗时 **300 秒**、Token 预算 **100000**、单线程 CPU。
+
+然后输入：
+
+> 检查任务规则和预算，运行 Baseline，根据独立 validation 反馈提出候选并迭代。训练时等待工具完成，不轮询。按预算停止，交付历史最佳的模型代码、权重、配置和真实验证报告。
+
+- `/axiom-task-stop`：取消训练与 Agent turn，等待进程结束、交付已有合法最佳，再恢复原工具。两个 AXIOM 模式互斥；切换前先停止。
+- 自定义预算：`/axiom-task <完整 TaskSpec JSON>`，只能由用户在命令中设置并审批；完整格式和范围见 [验收文档](docs/AXIOM_VALIDATION.md)。模型工具不能放宽规则或更改配置。
+- 只有四个原生领域工具：`axiom_task_inspect`、`axiom_task_baseline`、`axiom_task_candidate`、`axiom_task_finish`。一次候选工具内部完成审查、去重、Smoke、完整训练和独立验证，不另建 Agent Loop。
+- 每次任务的 `private/wp04-*/` 保存 `summary.json`、`experiments.json`、`events.jsonl`、`report.md`、源码 Diff、命令记录及历史最佳 `model.py`、`config.json`、`best_model.pt`、可独立重载的 `best/`。
+- Token 按 Pi 原生 assistant usage 实际结算，包括缓存 Token；请求前只是估算准入，**不是供应商输出 Token 硬限制或绝对金额上限**。实际消耗可能超出估算，随后停止进一步请求。没有批准就不做收费 API 验收。
+
 ### 重要限制
 
-- `/axiom-tiny` 只支持**一个**固定合成 Tiny Task 和**一个候选**；不是旧 WP-04 的多轮优化，也不是任意课程作业/论文仓库。
+- `/axiom-tiny` 保留单候选流程；`/axiom-task` 支持多轮预算流程。两者都只支持固定可信合成任务，不支持任意课程作业/论文仓库。
 - 工具层限制路径、命令与候选语法；原生 Pi TUI 的插件机制仍运行在用户系统权限下，**不能把它当作 OS 安全沙箱**。
 - Tiny 模式期间会禁用其他模型工具并拦截非 AXIOM Tool Calls；退出模式后恢复之前的工具选择。其他扩展自身的执行和用户主动运行的 Shell 不在此保证范围内。
 - 不能通过最终测试集反复调参；程序独立验证 validation 指标。
@@ -110,7 +129,7 @@ npm run axiom -- --tui-mode regular
 
 1. 保持完整构建、静态检查和 `npm run test:ml` 回归通过；
 2. 在用户批准 API 范围与费用后，验收交互 TUI 与真实模型自主 Tool Calling；
-3. 从旧电脑本地按模块恢复尚未推送的 WP-04 **多轮 Experiment Loop、预算控制与任务交付**，不迁移旧 readline/Session/模型路由包装；
+3. 完善任务跨会话/重启恢复及更多真实模型评测；目前落盘不等于能从 Pi 对话恢复 Controller；
 4. 使用 Pi 原生模型目录配置 NIM / DeepSeek；不直接恢复旧的自定义 streamFunction 回退；
 5. 完善取消、恢复、失败交付与 T1/T2 评测，再扩展 Ablate / Reproduce / GPU Runner。
 

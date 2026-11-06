@@ -21,7 +21,7 @@
 | `src/research.ts` 与 `src/table.ts` | `packages/coding-agent/src/axiom/` | 实验清单和数据表输出 |
 | `examples/tiny-ml-*` | 根目录 `examples/tiny-ml-*` | PyTorch 合成任务、评估/审查脚本 |
 | `tests/python` / `tests/fixtures` | 根目录对应路径 | Python 回归与合成参考结构 |
-| 原 Agent 工具编排 | `.pi/extensions/axiom-tiny.ts` | **新写的 Pi 原生桥接**，未复制重复 SDK 初始化 |
+| 原 Agent 工具编排 | `axiom/extensions/axiom-tiny.ts` | **显式加载**的 Pi 原生桥接，避免被开发工具 Pi 自动发现；未复制重复 SDK 初始化 |
 | 新版 Node 策略测试 | `tests/axiom/decision.test.mjs` | 单轮决策确定性测试 |
 
 由于 Pi 的 TypeScript 配置采用 `erasableSyntaxOnly`，迁入的两处构造器参数属性已改写为普通字段初始化；业务规则与训练决策不应因此改变。
@@ -36,7 +36,7 @@
 
 ## 4. 新入口的明确能力边界
 
-`/axiom-tiny`：在 Pi 原生会话中，通过人工同意创建受控 Tiny Task，暂时只开放九个 namespaced ML 工具；自动禁用普通 Pi 工具以便不绕过限定的任务动作。
+`/axiom-tiny`：在通过 `npm run axiom` 启动的 Pi 原生会话中，通过人工同意创建受控 Tiny Task，暂时只开放九个 namespaced ML 工具；自动禁用普通 Pi 工具以便不绕过限定的任务动作。
 
 **仍不是 OS 沙箱**：Pi 扩展/用户账号具备本地进程权限，不能用这套 Tiny 安全策略运行来源不明的训练仓库。训练与来源 SHA、AST 策略适用于固定可信任务。
 
@@ -49,7 +49,7 @@ npm ci
 npm run build
 .\.venv\Scripts\python.exe -m unittest discover -s tests\python -v
 node --test tests\axiom\decision.test.mjs tests\axiom\single-optimize.test.mjs tests\axiom\smoke-permissions.test.mjs
-node packages\coding-agent\dist\bundle\cli.js --tui-mode regular
+npm run axiom
 ~~~
 
 进入原生 Pi：

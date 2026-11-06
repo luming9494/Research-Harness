@@ -1,206 +1,124 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square" /></a>
-</p>
+# Research Harness · AXIOM
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
+**基于固定版本 Pi 1.5.0 源码开发的自主机器学习工程 Agent。**
 
-# Pi
+> **当前状态：迁移中的开发版本。** 新仓库以完整 Pi 源码为基础，已迁入原 AXIOM 公开仓库的 Tiny PyTorch 任务、真实训练与独立验证、候选代码审查、单轮模型优化及基础实验数据处理。新增原生 Pi Extension 入口，但**尚未在新仓库完成本地构建、模型 API 或端到端重新验收**。之前 WP-04 的多轮预算/NIM 功能主要在旧电脑本地且未推送，**目前不在这个仓库中**。
 
-Pi is a minimal, extensible agent harness that you can make your own.
+## 为什么重新基于 Pi 源码开发？
 
-Adapt Pi to your workflows, not the other way around. Customize Pi with [extensions](packages/coding-agent/docs/extensions.md), [skills](packages/coding-agent/docs/skills.md), [prompt templates](packages/coding-agent/docs/prompt-templates.md), and [themes](packages/coding-agent/docs/themes.md). Bundle them as [Pi packages](packages/coding-agent/docs/packages.md) and share via npm or git.
+旧 AXIOM 通过 Pi SDK 自行实现了一层 CLI、Session 工厂、日志订阅和供应商回退。这与 Pi 已经存在的 TUI、Agent Loop、Extensions、模型目录和上下文机制部分重复。
 
-Pi ships with powerful defaults but skips features like sub-agents and plan mode. Ask Pi to build what you want, or install a package that does it your way.
+**新原则：Pi 就是 Agent 主体，AXIOM 只负责机器学习业务。** 直接保留 Pi 的原生 TUI、会话、模型、工具调度和上下文；将 ML TaskSpec、候选改动、训练执行、预算、独立评估、历史最佳和交付集成为它的领域扩展。
 
-Use Pi [interactively](packages/coding-agent/docs/usage.md), automate it in [print or JSON mode](packages/coding-agent/docs/cli.md), control it over [RPC](packages/coding-agent/docs/rpc.md), or build apps with the [Pi TypeScript SDK](packages/coding-agent/docs/sdk.md). See [OpenClaw](https://github.com/OpenClaw/OpenClaw) for a real-world integration.
+- **Pi 负责**：聊天与编码能力、模型/凭据配置、Agent Loop、工具事件、会话与上下文。
+- **AXIOM 负责**：机器学习任务规则、受控候选代码、训练/Smoke/Proxy/Full、独立指标检验、实验循环与产物。
+- **不会做**：再次开发简易聊天界面、重复实现基础模型调用、自研另一套 Pi Session/TUI。
+- **版本策略**：以当前下载的 Pi 1.5.0 源码为固定底座，**不自动追踪上游更新**。AXIOM 与 Pi 原作者没有从属或官方合作关系。
 
-## Getting started
+## 核心目标：三类 ML 任务
 
-Install the command-line interface:
+| 目标模式 | 典型输入 | 最终交付 | 状态 |
+| --- | --- | --- | --- |
+| **Optimize** 模型改进与课程打榜 | 基线代码、规则、训练数据、指标、预算 | 合法模型代码、权重、独立验证、实验总结 | Tiny Task 单候选已迁移，多轮尚未迁移 |
+| **Reproduce** 论文复现 | 论文、GitHub 仓库、数据及复现协议 | Run / Evaluate / Train 复现级别、指标差距 | 规划中 |
+| **Ablate** 消融实验 | 基线、模块组合、已有实验和预算 | 消融组合、真实结果、配置和报告 | 规划中 |
 
-```bash
-curl -fsSL https://pi.dev/install.sh | sh
-```
+目标交互是：**自然语言任务 → 检查规则 → 规划候选 → 改代码 → 真训练/评估 → 根据客观结果迭代 → 按预算停止 → 交付模型与报告**。
 
-On Windows:
+当前新仓库只迁移了 **WP-01～03 的公共代码**，不声称已经可以接管任意第三方训练仓库。原本在本地通过的 WP-04 多轮流程还需单独导入和移除重复 Pi 包装。
 
-```shell
-powershell -c "irm https://pi.dev/install.ps1 | iex"
-```
+## 新源码在哪里？
 
-The installer pins all dependencies and updates Pi with `pi update`. Alternatively, install directly with npm, which does not pin transitive dependencies:
+~~~text
+Research-Harness/
+├── packages/                   # 原 Pi monorepo（基本保持原样）
+│   └── coding-agent/
+│       └── src/
+│           └── axiom/
+│               ├── execution/
+│               │   ├── process.ts           # 受控进程执行与输出限制
+│               │   ├── smoke-workspace.ts   # 隔离候选、白名单、AST 检查入口
+│               │   └── single-optimize.ts  # 单轮优化、客观 keep/revert
+│               ├── research.ts             # 实验清单/指标来源校验
+│               └── table.ts                # Markdown/CSV/LaTeX 导出
+├── .pi/extensions/
+│   └── axiom-tiny.ts           # Pi 原生 Tiny Task 命令与工具桥接
+├── examples/
+│   ├── tiny-ml-task/           # 固定合成基线模型
+│   ├── tiny-ml-eval/           # 训练、验证、判题与源码审查
+│   └── synthetic-experiment/  # 公开合成实验记录
+├── tests/
+│   ├── python/                # 原 AXIOM Python 回归测试
+│   ├── fixtures/              # 人工参考结构，仅用于离线校准与测试
+│   └── axiom/decision.test.mjs # 新仓库的确定性 Node.js 验证
+└── docs/
+    ├── AXIOM_MIGRATION.md     # 迁移完成/缺失项与核验步骤
+    └── AXIOM_ROADMAP.md       # 下一步开发重点
+~~~
 
-```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-```
+扩展入口**不创建新的 Pi Session、readline 或模型流包装**。单候选 ML 领域状态在 AXIOM 自己的 Controller 中；Pi 仍保存真正的会话。
 
-Pi requires Node.js 22.19 or newer. The macOS, Linux, and Windows installers can install it if needed. Pi does not require dependency lifecycle scripts for a normal npm installation.
+## 在 Windows / VS Code 中体验（Tiny Task）
 
-Start Pi in the directory where you want it to work:
+要求：Node.js >=22.19，Python 虚拟环境含 PyTorch（CPU 即可），本地 Pi 配置好有效模型凭据。
 
-```bash
-cd /path/to/project
-pi
-```
+~~~powershell
+git clone https://github.com/luming9494/Research-Harness.git
+cd Research-Harness
+npm ci
+npm run build
 
-For a built-in AI provider, run `/login` inside Pi to connect a subscription or API key. Then give Pi a task.
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r examples\tiny-ml-eval\requirements-cpu.txt
 
-See the [documentation](https://pi.dev/docs/latest) for full setup and usage instructions, or [visit pi.dev](https://pi.dev) for demos.
+# 无需 LLM/GPU 的测试：先验证任务底座
+.\.venv\Scripts\python.exe -m unittest discover -s tests\python -v
+node --test tests\axiom\decision.test.mjs
 
-## Run with Nix
+# 使用 Pi 原生终端，regular 模式方便回看历史输出
+node packages\coding-agent\dist\bundle\cli.js --tui-mode regular
+~~~
 
-```bash
-nix run github:earendil-works/pi/stable
-```
+进入 Pi 后输入：
 
-`stable` points at the latest release. Install it with `nix profile add github:earendil-works/pi/stable` and update with `nix profile upgrade pi`. Use a release tag such as `github:earendil-works/pi/v1.0.0` to pin a version, or `github:earendil-works/pi` for unreleased changes on `main`. Nix builds Pi from source.
+~~~text
+/axiom-tiny
+~~~
 
-Supports ARM64 and x86-64 on Linux and macOS. Use `nix build .` or `nix run .` to build or run your checkout.
+确认允许运行本地受控训练，再输入自然语言，例如：
 
-Nix builds are offline, so the bundled model data comes from a pi.dev model catalog revision pinned in `nix/model-catalog.json`. At runtime, Pi still overlays newer catalog data from pi.dev as usual. The Nix workflow replaces the pin on `main` when it no longer matches the checkout, for example after a provider is added or gains a new model type. To refresh it by hand:
+> 检查这个 Tiny ML 分类任务，先评估线性 Baseline，自己提出一个合法模型改动，做 L0 和 Smoke Test，执行一次完整候选训练，根据独立 validation 指标决定 keep 或 revert，最后展示代码 Diff 和产物路径。
 
-```bash
-npm run update:model-catalog-pin
-```
+如要退出受控模式，输入：
 
-## Packages
+~~~text
+/axiom-stop
+~~~
 
-This monorepo contains the Pi CLI and its supporting libraries.
+所有候选和训练产物写入本地忽略的 `private/`。**执行会调用你在 Pi 中选定的模型 API，并可能收费；训练会使用本机 CPU。**
 
-| Package | Description |
-|---------|-------------|
-| **[@earendil-works/chord](packages/chord)** | Object runtime for apps across processes: contracts, documents, a store, links, plugins with hot reload, HTTP, workers, web and terminal clients |
-| **[@earendil-works/pi-telemetry](packages/telemetry)** | Vendor-neutral telemetry contracts, reference adapter, conformance tests, and typed schemas |
-| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@earendil-works/pi-durable](packages/durable)** | Durable conversation, task, and document runtime |
-| **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
+### 重要限制
 
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
+- `/axiom-tiny` 只支持**一个**固定合成 Tiny Task 和**一个候选**；不是旧 WP-04 的多轮优化，也不是任意课程作业/论文仓库。
+- 工具层限制路径、命令与候选语法；原生 Pi TUI 的插件机制仍运行在用户系统权限下，**不能把它当作 OS 安全沙箱**。
+- Tiny 模式期间会禁用其他模型工具并拦截非 AXIOM Tool Calls；退出模式后恢复之前的工具选择。其他扩展自身的执行和用户主动运行的 Shell 不在此保证范围内。
+- 不能通过最终测试集反复调参；程序独立验证 validation 指标。
+- API Key、未发表论文、真实实验结果和模型权重不得上传到公开仓库。
 
-## Permissions & Containerization
+## 下一步开发重点
 
-Pi does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.
+1. **先重新跑通新仓库的完整构建与无模型回归**，修复 Pi Monorepo 内的 TypeScript/扩展兼容问题；
+2. **验收原生 Pi TUI → AXIOM 工具 → 真实 Python 训练 → 结果交付**；
+3. 从旧电脑本地按模块恢复尚未推送的 WP-04 **多轮 Experiment Loop、预算控制与任务交付**，不迁移旧 readline/Session/模型路由包装；
+4. 使用 Pi 原生模型目录配置 NIM / DeepSeek；不直接恢复旧的自定义 streamFunction 回退；
+5. 完善取消、恢复、失败交付与 T1/T2 评测，再扩展 Ablate / Reproduce / GPU Runner。
 
-If you need stronger boundaries, containerize or sandbox Pi. See [packages/coding-agent/docs/containerization.md](packages/coding-agent/docs/containerization.md) for three patterns:
+详见 [迁移说明](docs/AXIOM_MIGRATION.md) 和 [开发路线](docs/AXIOM_ROADMAP.md)。
 
-- **Gondolin extension**: keep `pi` and provider auth on the host while routing built-in tools and `!` commands into a local Linux micro-VM.
-- **Plain Docker**: run the whole `pi` process in a local container for simple isolation.
-- **OpenShell**: run the whole `pi` process in a policy-controlled sandbox.
+## Pi 来源和许可
 
-## Contributing
+本仓库以 [earendil-works/pi](https://github.com/earendil-works/pi) 的 Pi 1.5.0 代码为主体。原 Pi 子包和文档可从 [packages/coding-agent](packages/coding-agent/README.md) 继续阅读。**原有 MIT LICENSE 和版权声明保留不变。** 本项目是独立的衍生开发，不是 Pi 官方版本。
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).  Longer term plans for Pi can also be found in [RFCs](https://rfc.earendil.com/keyword/pi/).
+---
 
-## Development
-
-```bash
-npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-npm run build         # Refresh model data, then build all packages
-npm run build:offline # Rebuild using existing model data without network access
-npm run check         # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
-```
-
-### Using local packages outside the monorepo
-
-Build every public package into one coherent local artifact set:
-
-```bash
-npm run pack:packages -- --out .artifacts/pi-packages
-```
-
-This refreshes model data before building `pi-ai`. To avoid network access when
-model data is already hydrated, pass `--offline-model-data`.
-
-Then configure an external project to consume one package and resolve all of
-its Pi dependencies from the same artifact set. npm is the default:
-
-```bash
-node scripts/use-local-packages.mjs \
-  --manifest .artifacts/pi-packages/manifest.json \
-  --consumer ../my-project \
-  --package @earendil-works/pi-durable \
-  --package @earendil-works/pi-agent-core
-cd ../my-project
-npm install --ignore-scripts
-```
-
-For a pnpm project, point `--consumer` at the workspace root:
-
-```bash
-node scripts/use-local-packages.mjs \
-  --manifest .artifacts/pi-packages/manifest.json \
-  --consumer ../my-project \
-  --package @earendil-works/pi-agent-core \
-  --package-manager pnpm
-cd ../my-project
-pnpm install --ignore-scripts
-```
-
-Repeat `--package` for each direct dependency. The command updates the
-consumer's `package.json` with content-addressed local `file:` references. It
-writes transitive overrides to `package.json` for npm or `pnpm-workspace.yaml`
-for pnpm. Keep the artifact directory available while installing or updating
-the consumer. Re-run both commands after changing Pi source.
-
-## Building standalone binaries from release source
-
-GitHub releases include a versioned source archive covered by the release's `SHA256SUMS` file. Extract it and run the same build script used for the official standalone binaries:
-
-```bash
-VERSION="<release-version>"
-tar -xzf "pi-${VERSION}-source.tar.gz"
-cd "pi-${VERSION}"
-./scripts/build-binaries.sh --offline-model-data --platform linux-x64 --out "$PWD/out"
-```
-
-The archive includes release model data and native prebuilds. `--offline-model-data` uses that model data without refreshing provider catalogs. The script installs dependencies and builds the executable with its runtime assets; pass `--skip-install` if dependencies are already provided.
-
-## Supply-chain hardening
-
-We treat npm dependency changes as reviewed code changes.
-
-- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged.
-- `.npmrc` sets `save-exact=true` and `min-release-age=2` to avoid same-day dependency releases during npm resolution.
-- `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
-- `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent install lock.
-- The pi.dev installer installs from `packages/coding-agent/install-lock/`, generated from the root lockfile, to pin transitive deps. The npm package does not pin transitive deps.
-- Local release smoke tests and npm publication use the same tarball packer; npm publishes the validated tarballs rather than repacking workspace directories.
-- Local release installs, documented npm installs, and `pi update --self` use `--ignore-scripts` where supported.
-- CI installs with `npm ci --ignore-scripts`, and a scheduled GitHub workflow runs `npm audit --omit=dev` plus `npm audit signatures --omit=dev`.
-- Install lock generation has an explicit allowlist for dependency lifecycle scripts; new lifecycle-script deps fail checks until reviewed.
-
-## Share your OSS coding agent sessions
-
-If you use Pi or other coding agents for open source work, please share your sessions.
-
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
-
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
-
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
-
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
-
-I regularly publish my own `pi-mono` work sessions here:
-
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
-
-## License
-
-MIT
-
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+**Research Harness / AXIOM · From Task to Experiment, From Experiment to Evidence.**

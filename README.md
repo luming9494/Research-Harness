@@ -73,7 +73,7 @@ py -m venv .venv
 
 # 无需 LLM/GPU 的测试：先验证任务底座
 .\.venv\Scripts\python.exe -m unittest discover -s tests\python -v
-node --test tests\axiom\decision.test.mjs
+node --test tests\axiom\decision.test.mjs tests\axiom\single-optimize.test.mjs tests\axiom\smoke-permissions.test.mjs
 
 # 使用 Pi 原生终端，regular 模式方便回看历史输出
 node packages\coding-agent\dist\bundle\cli.js --tui-mode regular
@@ -113,7 +113,7 @@ node packages\coding-agent\dist\bundle\cli.js --tui-mode regular
 4. 使用 Pi 原生模型目录配置 NIM / DeepSeek；不直接恢复旧的自定义 streamFunction 回退；
 5. 完善取消、恢复、失败交付与 T1/T2 评测，再扩展 Ablate / Reproduce / GPU Runner。
 
-详见 [迁移说明](docs/AXIOM_MIGRATION.md) 和 [开发路线](docs/AXIOM_ROADMAP.md)。
+详见 [产品需求](docs/PRODUCT_REQUIREMENTS.md)、[评测设计](docs/EVALUATION.md)、[迁移说明](docs/AXIOM_MIGRATION.md) 和 [开发路线](docs/AXIOM_ROADMAP.md)。
 
 ## Pi 来源和许可
 

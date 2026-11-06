@@ -48,7 +48,7 @@
 npm ci
 npm run build
 .\.venv\Scripts\python.exe -m unittest discover -s tests\python -v
-node --test tests\axiom\decision.test.mjs
+node --test tests\axiom\decision.test.mjs tests\axiom\single-optimize.test.mjs tests\axiom\smoke-permissions.test.mjs
 node packages\coding-agent\dist\bundle\cli.js --tui-mode regular
 ~~~
 

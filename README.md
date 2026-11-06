@@ -65,7 +65,7 @@ Research-Harness/
 
 ## 在 Windows / VS Code 中体验（Tiny Task）
 
-要求：Node.js >=22.19，Python 虚拟环境含 PyTorch（CPU 即可），本地 Pi 配置好有效模型凭据。
+要求：Node.js >=22.19，Python 虚拟环境含 PyTorch（CPU 即可）。Research-Harness 的凭据使用下述独立登录命令配置，不复用全局开发 Pi 的凭据文件。
 
 ~~~powershell
 git clone https://github.com/luming9494/Research-Harness.git
@@ -79,11 +79,38 @@ py -m venv .venv
 # 无需 API/GPU：Python、Node 控制器和 Pi Session 集成回归
 npm run test:ml
 
-# 当前仓库编译出的 Pi，显式加载 AXIOM；不改变全局安装的 pi
-npm run axiom -- --tui-mode regular
+# 一次性保存 Research-Harness 专属的 DeepSeek Key（提示中输入，不写进命令）
+npm run axiom:login
+
+# 仓库自己的 Pi，默认 regular TUI；无需手动设置环境变量
+npm run axiom
 ~~~
 
-全局 `pi` 继续用于开发，不自动加载 AXIOM。`npm run axiom` 使用 Pi 自带的 TypeScript 扩展加载器加载仓库领域源码，修改领域代码后仍应重新构建并跑测试。
+### 开发 Pi 与 Research-Harness 的配置隔离
+
+| 用途 | 命令 | 用户配置目录 |
+| --- | --- | --- |
+| 全局开发工具 | `pi` | 默认 `%USERPROFILE%\.pi\agent`，保持原样 |
+| Research-Harness | `npm run axiom` | `%LOCALAPPDATA%\Research-Harness\agent`，在仓库外 |
+| 项目专属 DeepSeek 登录 | `npm run axiom:login` | 同上，Pi 原生隐藏输入并持久保存 `auth.json` |
+| 项目专属 DeepSeek 退出 | `npm run axiom:logout` | 同上，不删除开发 Pi 的 Key |
+
+`auth.json`、`settings.json`、`models.json` 和 `sessions/` 均使用 Research-Harness 的独立目录。登录一次后，后续启动自动读取，不需要每次填 Key。不会复制或修改全局 Pi 的安装和配置；不要将 Key 存放在仓库的 `private/`、`.env` 或 `.pi/` 中。Pi 的 `auth.json` 是本机明文文件，依赖系统账户权限保护，不是加密密码库。
+
+`scripts/launch-axiom.mjs` 仅在子进程环境设置 `PI_CODING_AGENT_DIR` 和独立的 `PI_CODING_AGENT_SESSION_DIR`，工作目录固定为仓库，执行仓库编译的 CLI。正常启动使用 `-ne -e axiom/extensions/axiom-tiny.ts --tui-mode regular`，禁用扩展自动发现；登录/退出直接传给原生 `auth`，不加载 AXIOM 实验扩展。Ctrl+C 交由共享前台终端中的 Pi 处理，启动器等待退出，不再重复转发 Ctrl+C 打断其清理。
+
+其他供应商仍走原生认证，无需新增请求包装：
+
+```powershell
+node scripts/launch-axiom.mjs auth login <provider> --api-key
+node scripts/launch-axiom.mjs auth logout <provider>
+```
+
+CLI 参数可以透传，例如 `npm run axiom -- --offline --version`、`npm run axiom -- --continue`。只有用户显式指定其他 session 路径时才可能越过默认会话隔离，勿指向开发 Pi 的会话。原生环境凭据的解析优先级不变：父进程中的供应商 Key 环境变量仍可被 Pi 使用；本改造隔离的是持久配置文件，不是进程权限/环境沙箱。专属 Key 应通过 `axiom:login` 保存，不依赖开发工具的环境 Key。
+
+未构建时会明确提示 `npm run build`；若提示找不到 `scripts/launch-axiom.mjs`，请确认当前检出包含该脚本，不要改用会共享配置的旧直连命令。`LOCALAPPDATA` 缺失、不是绝对路径或最终目录指向仓库/全局 Pi 配置时会拒绝启动，不回退到仓库。本启动方案面向 Windows。
+
+全局 `pi` 继续用于开发，不自动加载 AXIOM。项目 `.pi` 指令、Skills 等仍遵循 Pi 原生规则，不等于 OS 隔离。领域源码使用 Pi 自带 TypeScript 加载器；修改后仍应重新构建并跑测试。
 
 进入 AXIOM 启动的 Pi 后输入：
 

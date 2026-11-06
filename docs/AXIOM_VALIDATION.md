@@ -6,6 +6,23 @@ WP-04 的可信 Tiny CPU 多轮领域内核已从本地旧工程迁入，并接�
 
 **这不是完整产品或真实模型自主优化验收。** 所有候选是人工校准输入，Session 使用 Pi 现有 faux provider。CPU 训练、Checkpoint、独立验证和最终交付为真实产物；faux usage 只证明原生记账路径，不代表供应商账单验收。未调用收费模型 API，未升级 Pi，未新增依赖。
 
+## 启动与凭据隔离（无收费调用）
+
+新增 `scripts/launch-axiom.mjs`；根 npm 命令 `axiom`、`axiom:login`、`axiom:logout` 均通过它启动仓库构建的原生 Pi CLI，不改 Agent Loop、AuthStorage、SessionManager、模型供应商或训练执行器。
+
+- 开发工具 `pi` 仍使用默认 `%USERPROFILE%\.pi\agent`；启动器不修改全局安装、环境变量或凭据文件。
+- Research-Harness 固定使用仓库外 `%LOCALAPPDATA%\Research-Harness\agent`；凭据为该目录的 `auth.json`，模型/用户设置和 `sessions/` 同样独立。仅修改 spawn 子进程环境，并覆盖继承的会话目录变量，避免意外沿用开发工具的会话路径。
+- `npm run axiom` 默认 regular TUI，使用 `-ne -e` 只显式加载审核过的 AXIOM 入口。`npm run axiom:login` / `axiom:logout` 分别透传原生 `auth login deepseek --api-key` / `auth logout deepseek`，不加载实验扩展；没有新实现凭据存储/加密或模型请求。
+- 不把 Key 写进命令、调试日志或仓库；不复制开发 Pi 的 Key。供应商环境凭据仍遵循 Pi 原生优先级，配置目录隔离不是环境/OS 沙箱。用户显式传入其他 session 路径也能改变原生会话选择，不能将这种主动覆盖称为隔离保证。
+- 未构建、缺少扩展、缺失/相对 `LOCALAPPDATA`、配置目录落在仓库或被链接回仓库/全局配置时拒绝启动。脚本本身缺失时 Node 会给出含脚本路径的 `MODULE_NOT_FOUND`，应恢复脚本而非使用旧直连命令。
+- Ctrl+C 由共享前台终端传给原生 Pi；启动器不重复发送，等待其退出并传递退出码。程序收到 SIGTERM 时转发给子进程。真实终端键盘/视觉及带真实 Key 的交互登录尚未做人工验收。
+
+离线验证 `tests/axiom/launch-axiom.test.mjs`：独立目录/固定 cwd/参数与退出码透传、原生 AuthStorage 的假凭据保存及删除、开发凭据哨兵不变、其他供应商路由、缺构建/脚本/扩展和不安全路径错误，以及真实编译 CLI 经启动器离线 RPC 枚举 AXIOM 命令。假 CLI 仅用于证明参数路由；假 Key 不是真实供应商凭据，不把它当作真实交互登录验收。真实编译 CLI 另验证了临时隔离目录中的原生 logout，以及非交互 login 明确拒绝输入（不会提交真实 Key）。
+
+本轮实际结果：`npm run build:offline` 完整 monorepo 离线构建通过；`npm run check` 通过；`npm run test:ml` **72/72** 通过、无跳过（Python 18、Node 40、Pi Session 14），保留原 63 项并新增上述 9 项。全局 `pi --version` 与 `npm run axiom -- --offline --version` 均为 **1.5.0**。没有修改全局 Pi 安装或配置，也没有执行真实收费验收。
+
+启动与登录方法见 [README](../README.md#开发-pi-与-research-harness-的配置隔离)。凭据不是训练产物，不存进 `private/`；原有训练产物路径不变。本轮不调用收费模型 API。
+
 ## WP-04 实现范围与实际文件
 
 旧源码实际位于 `D:\graduate_student\AXIOM\AXIOM`，已检查其 TaskSpec/Budget/Executor/Controller、旧 Agent/decision 包装及对应单元/CPU 测试。旧工程未修改。迁移与适配范围：

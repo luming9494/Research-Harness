@@ -13,11 +13,15 @@ import {
 	type ExperimentRole,
 	type ExperimentTaskSpec,
 	type FailureCategory,
+	type FidelityAdapter,
 	objectiveValue,
 	type RunResult,
+	type StageResult,
+	type TrainingStage,
 	validateProposal,
 	type WorkerOperation,
 } from "./experiment-domain.ts";
+import { decidePromotion, type PromotionDecision } from "./fidelity-policy.ts";
 import { type BudgetReason, BudgetStop, TaskBudget } from "./task-budget.ts";
 import { tinyEvaluation, tinyExperimentDomain } from "./task-executor.ts";
 
@@ -34,8 +38,16 @@ export type StopReason =
 	| "user_finished";
 export interface ExperimentRow {
 	id: string;
-	status: "evaluated" | "cache_hit" | "failed";
+	status: "evaluated" | "cache_hit" | "failed" | "screening" | "pruned";
 	rationale: string;
+	evidence?: string;
+	staged?: {
+		candidate: Candidate;
+		smoke?: StageResult;
+		proxy?: StageResult;
+		full?: StageResult;
+		decision?: PromotionDecision;
+	};
 	fingerprint?: string;
 	validation?: RunResult["validation"];
 	run?: string;
@@ -58,6 +70,7 @@ export interface TaskSummary {
 	delivery?: ArtifactManifest;
 	failure_category?: FailureCategory;
 	revisions_used?: number;
+	fidelity?: FidelitySummary;
 	ended_at?: number;
 	compute_reserved_seconds: number;
 	unconfirmed_training_steps: number;
@@ -70,6 +83,25 @@ export interface TaskSummary {
 	};
 	budget: ReturnType<TaskBudget["snapshot"]>;
 	final_test_used: false;
+}
+interface FidelitySummary {
+	proposals: number;
+	full_candidates_started: number;
+	full_candidates_evaluated: number;
+	full_candidate_limit: number;
+	full_candidates_remaining: number;
+	pruned: number;
+	avoided_full_steps: number;
+	stages: Record<
+		TrainingStage | "review",
+		{
+			starts: number;
+			confirmed_worker_successes: number;
+			committed_training_steps: number;
+			unconfirmed_training_steps: number;
+			settled_process_seconds: number;
+		}
+	>;
 }
 
 // 领域账本由 Durable 适配器实现，控制器持有的内存状态只服务当前所有者。
@@ -191,6 +223,8 @@ export class TaskController {
 		const root = await mkdtemp(join(parent, "wp04-"));
 		const budget = new TaskBudget(spec);
 		const executor = await domain.open({ repo, root, python, budget });
+		if (spec.fidelity && (!durable || !executor.fidelity))
+			throw new Error("Fidelity tasks require a durable stage adapter");
 		const task = new TaskController(root, spec, budget, executor, onStop);
 		const ledger = await durable?.open(root);
 		try {
@@ -240,10 +274,24 @@ export class TaskController {
 			});
 			for (const command of saved.commands) if ("recordSha256" in command) await executor.verifyCommand(command);
 			const task = new TaskController(root, spec, budget, executor, onStop);
+			if (spec.fidelity && !executor.fidelity) throw new Error("Missing durable stage adapter");
 			task.attach(ledger, executor, saved.approval, saved.deadline, domain);
 			task.commands = saved.commands;
 			task.requests = saved.requests;
 			task.rows = saved.rows;
+			// 恢复先校验代理和 Smoke 工件，只有独立 Full 进入正式候选缓存。
+			if (executor.fidelity) {
+				for (const row of saved.rows) {
+					if (!row.staged) continue;
+					for (const stage of ["smoke", "proxy", "full"] as const) {
+						const evidence = row.staged[stage];
+						if (!evidence) continue;
+						if (evidence.stage !== stage)
+							throw new ExperimentFailure("evidence_integrity", "Saved receipt has wrong fidelity");
+						await executor.fidelity.verify(row.staged.candidate, evidence);
+					}
+				}
+			}
 			task.failure = saved.summary.failure;
 			task.failureCategory = saved.summary.failure_category;
 			task.revisionsUsed = saved.summary.revisions_used ?? 0;
@@ -282,9 +330,22 @@ export class TaskController {
 				if (op.reservation && op.fingerprint && op.status === "not_started" && !authorized.has(op.fingerprint))
 					task.attempted.delete(op.fingerprint);
 			for (const fingerprint of authorized) task.attempted.add(fingerprint);
-			// 没有获授权的训练时可重新执行只读审查；有训练凭证但还没有完整结果时暂停。
+			const pendingRow = task.rows.find((row) => row.id === task.pendingRun && row.staged);
+			// 已完成阶段以已提交的凭证为准。训练或评分完成但凭证尚未提交时保持待核对。
+			const stageUncertain =
+				pendingRow &&
+				task.commands.some(
+					(op) =>
+						op.runId === pendingRow.id &&
+						op.stage &&
+						op.stage !== "review" &&
+						!pendingRow.staged?.[op.stage] &&
+						op.status !== "not_started",
+				);
+			// 历史任务没有阶段凭证，只重新执行可证实没有获授权的步骤。
 			if (
 				task.pendingRun &&
+				!pendingRow &&
 				!task.commands.some(
 					(op) =>
 						op.runId === task.pendingRun &&
@@ -296,7 +357,9 @@ export class TaskController {
 				task.pendingRun = undefined;
 			}
 			const interrupted =
-				task.pendingRun || task.commands.some((op) => op.status === "unknown") || budget.pendingUsage;
+				(task.pendingRun && (!pendingRow || stageUncertain)) ||
+				task.commands.some((op) => op.status === "unknown") ||
+				budget.pendingUsage;
 			task.markUsageUnknownInMemory();
 			if (
 				interrupted &&
@@ -312,6 +375,15 @@ export class TaskController {
 				task.failure = "System wall clock is behind the last saved checkpoint";
 			}
 			try {
+				if (!task.stopped && pendingRow && executor.fidelity && !interrupted) {
+					try {
+						task.budget.check();
+						await task.advanceStaged(pendingRow, executor.fidelity, task.cancellation.signal);
+					} catch (error) {
+						task.failRow(pendingRow, error);
+						task.handleFailure(error, "candidate", task.cancellation.signal);
+					}
+				}
 				task.checkStopConditions();
 			} catch (error) {
 				if (!(error instanceof BudgetStop)) throw error;
@@ -480,7 +552,10 @@ export class TaskController {
 		return this.enqueue(async () => {
 			if (name === "inspect") return this.snapshot();
 			if (this.stopped) throw new Error(`Task stopped: ${this.reason}; no more experiments`);
-			const keys = name === "candidate" ? ["content", "rationale", "parameters"] : [];
+			const keys =
+				name === "candidate"
+					? ["content", "rationale", "parameters", ...(this.spec.fidelity ? ["evidence"] : [])]
+					: [];
 			// 工具入口不给任意配置、权限或评估协议覆盖的机会。
 			if (Object.keys(input).some((key) => !keys.includes(key)))
 				throw new ExperimentFailure(
@@ -562,7 +637,7 @@ export class TaskController {
 		if (this.commands.some((op) => op.status === "intent" || op.status === "started" || op.status === "unknown"))
 			return "external_unknown";
 		if (error instanceof BudgetStop) return "budget_exhausted";
-		return error instanceof ExperimentFailure ? error.category : "domain_execution";
+		return error instanceof ExperimentFailure ? error.category : "internal_error";
 	}
 
 	private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -581,7 +656,9 @@ export class TaskController {
 			"Unchanged actual baseline",
 			signal,
 		);
-		const evaluated = await this.runPrepared(prepared, "baseline", signal);
+		const evaluated = this.executor.fidelity
+			? (await this.executeStage(this.executor.fidelity, prepared, "full", "baseline", signal)).result
+			: await this.runPrepared(prepared, "baseline", signal);
 		this.baseline = chooseBest(undefined, evaluated, this.executor.evaluation);
 		this.best = this.baseline;
 		this.cache.set(evaluated.fingerprint, evaluated);
@@ -598,10 +675,15 @@ export class TaskController {
 		}
 		const row: ExperimentRow = { id: `exp-${this.rows.length + 1}`, status: "failed", rationale: "" };
 		this.rows.push(row);
+		// v3 的每次提交占用一个提案名额，缓存命中和剪枝仍保留对应记录。
+		if (this.spec.fidelity) this.budget.experiments++;
 		this.pendingRun = row.id;
 		try {
-			const { content, rationale, parameters } = validateProposal(input);
+			const { content, rationale, parameters, evidence } = validateProposal(input);
 			row.rationale = rationale;
+			row.evidence = evidence;
+			if (this.spec.fidelity && !evidence?.trim())
+				throw new ExperimentFailure("invalid_candidate", "A v3 candidate must cite supporting evidence");
 			await this.commitLedger();
 			const prepared = await this.executor.prepare(row.id, content, rationale, signal, parameters);
 			row.fingerprint = prepared.fingerprint;
@@ -615,6 +697,37 @@ export class TaskController {
 			}
 			if (!existing && this.attempted.has(prepared.fingerprint))
 				throw new ExperimentFailure("invalid_candidate", "Previously attempted experiment cannot be retrained");
+			if (!existing && this.executor.fidelity) {
+				const previousFailure = this.rows.find(
+					(previous) =>
+						previous !== row && previous.fingerprint === prepared.fingerprint && previous.status === "failed",
+				);
+				if (
+					previousFailure &&
+					this.commands.some(
+						(op) => op.runId === previousFailure.id && op.reservation && op.status !== "not_started",
+					)
+				)
+					throw new ExperimentFailure(
+						"invalid_candidate",
+						"Previously attempted fidelity experiment cannot be retrained",
+					);
+				const pruned = this.rows.find(
+					(previous) => previous.status === "pruned" && previous.fingerprint === prepared.fingerprint,
+				);
+				if (pruned) {
+					if (pruned.staged?.proxy)
+						await this.executor.fidelity.verify(pruned.staged.candidate, pruned.staged.proxy);
+					row.reused_from = pruned.id;
+					this.completeStaged(row, "pruned");
+					return;
+				}
+				row.staged = { candidate: prepared };
+				row.status = "screening";
+				await this.commitLedger();
+				await this.advanceStaged(row, this.executor.fidelity, signal);
+				return;
+			}
 			const result = existing ?? (await this.runPrepared(prepared, "candidate", signal));
 			this.best = chooseBest(this.best, result, this.executor.evaluation);
 			row.status = existing ? "cache_hit" : "evaluated";
@@ -628,12 +741,91 @@ export class TaskController {
 			this.failureCategory = undefined;
 			this.event(row.status, row);
 		} catch (error) {
-			row.error = String(error);
-			row.failure_category = this.classifyFailure(error);
-			row.best_id = this.best?.id;
-			this.event("candidate_failed", row);
+			this.failRow(row, error);
 			throw error;
 		}
+	}
+
+	private failRow(row: ExperimentRow, error: unknown): void {
+		row.status = "failed";
+		row.error = String(error);
+		row.failure_category = this.classifyFailure(error);
+		row.best_id = this.best?.id;
+		this.event("candidate_failed", row);
+	}
+
+	private async advanceStaged(row: ExperimentRow, adapter: FidelityAdapter, signal: AbortSignal): Promise<void> {
+		const work = row.staged;
+		const policy = this.spec.fidelity;
+		if (!work || !policy) throw new Error("Missing staged candidate");
+		if (policy.strategy === "multi_fidelity") {
+			// 每一级的可信证据单独提交，重启从第一个没有证据的阶段开始。
+			for (const stage of ["smoke", "proxy"] as const) {
+				if (work[stage]) continue;
+				work[stage] = await this.executeStage(adapter, work.candidate, stage, "candidate", signal);
+				await this.commitLedger();
+			}
+		}
+		const prior = this.rows.flatMap((previous) =>
+			previous !== row && previous.staged?.proxy ? [adapter.score(previous.staged.proxy)] : [],
+		);
+		const available = this.candidateFullStarts() < policy.max_full;
+		const score = work.proxy ? adapter.score(work.proxy) : undefined;
+		const decision = decidePromotion(score, prior, this.executor.evaluation.objectives[0].direction, available);
+		if (work.decision && JSON.stringify(work.decision) !== JSON.stringify(decision))
+			throw new ExperimentFailure("evidence_integrity", "Saved promotion decision does not match verified evidence");
+		if (!work.decision) {
+			work.decision = decision;
+			await this.commitLedger();
+			this.event("promotion_decided", { id: row.id, ...decision });
+		}
+		if (work.decision.action === "pruned") {
+			this.completeStaged(row, "pruned");
+			return;
+		}
+		const full = await this.executeStage(adapter, work.candidate, "full", "candidate", signal);
+		const { result } = full;
+		this.best = chooseBest(this.best, result, this.executor.evaluation);
+		work.full = full;
+		this.cache.set(result.fingerprint, result);
+		row.validation = result.validation;
+		row.run = result.run;
+		this.completeStaged(row, "evaluated");
+	}
+
+	private completeStaged(row: ExperimentRow, status: "pruned" | "evaluated"): void {
+		row.status = status;
+		row.best_id = this.best?.id;
+		this.pendingRun = undefined;
+		this.failure = undefined;
+		this.failureCategory = undefined;
+		this.event(status, row);
+	}
+
+	private async executeStage(
+		adapter: FidelityAdapter,
+		candidate: Candidate,
+		stage: TrainingStage,
+		role: ExperimentRole,
+		signal: AbortSignal,
+	): Promise<StageResult> {
+		signal.throwIfAborted();
+		const steps = adapter.steps(stage);
+		this.budget.reserveStage(steps);
+		const evidence = await adapter.run(candidate, { role, stage, steps }, signal);
+		if (evidence.stage !== stage)
+			throw new ExperimentFailure("evidence_integrity", "Worker returned a different fidelity");
+		return evidence;
+	}
+
+	private candidateFullStarts(): number {
+		return this.commands.filter(
+			(op) =>
+				op.reservation?.stage === "full" &&
+				op.reservation.role === "candidate" &&
+				op.status !== "not_started" &&
+				op.status !== "intent",
+		).length;
 	}
 
 	// 适配器提供成本，内核准入并把同一份预留交给适配器提交执行意图。
@@ -700,6 +892,7 @@ export class TaskController {
 			failure: this.failure,
 			failure_category: this.failureCategory,
 			revisions_used: this.spec.max_revisions === undefined ? undefined : this.revisionsUsed,
+			fidelity: this.fidelitySummary(),
 			delivery: this.delivery,
 			ended_at: this.endedAt,
 			budget,
@@ -715,6 +908,42 @@ export class TaskController {
 				wall_seconds: remaining(limits.wall_seconds - budget.wall_seconds),
 			},
 			final_test_used: false,
+		};
+	}
+
+	private fidelitySummary(): FidelitySummary | undefined {
+		const policy = this.spec.fidelity;
+		if (!policy || !this.executor.fidelity) return undefined;
+		const stageSummary = (stage: TrainingStage | "review"): FidelitySummary["stages"][typeof stage] => {
+			const commands = this.commands.filter((op) => op.stage === stage);
+			const started = commands.filter((op) => op.status !== "intent" && op.status !== "not_started");
+			const settled = started.filter((op) => "elapsedMs" in op);
+			return {
+				starts: started.filter((op) => stage === "review" || op.reservation).length,
+				confirmed_worker_successes: settled.filter((op) => op.status === "completed" && (stage === "review" || op.reservation)).length,
+				committed_training_steps: settled.reduce((total, op) => total + (op.reservation?.steps ?? 0), 0),
+				unconfirmed_training_steps: commands
+					.filter((op) => op.status !== "not_started" && !("elapsedMs" in op))
+					.reduce((total, op) => total + (op.reservation?.steps ?? 0), 0),
+				settled_process_seconds: settled.reduce((total, op) => total + op.elapsedMs, 0) / 1000,
+			};
+		};
+		const pruned = this.rows.filter((row) => row.status === "pruned" && !row.reused_from).length;
+		const fullStarts = this.candidateFullStarts();
+		return {
+			proposals: this.rows.length,
+			full_candidates_started: fullStarts,
+			full_candidates_evaluated: this.rows.filter((row) => row.staged?.full).length,
+			full_candidate_limit: policy.max_full,
+			full_candidates_remaining: this.stopped ? 0 : Math.max(0, policy.max_full - fullStarts),
+			pruned,
+			avoided_full_steps: pruned * this.executor.fidelity.steps("full"),
+			stages: {
+				review: stageSummary("review"),
+				smoke: stageSummary("smoke"),
+				proxy: stageSummary("proxy"),
+				full: stageSummary("full"),
+			},
 		};
 	}
 

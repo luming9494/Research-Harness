@@ -9,6 +9,7 @@ export interface ExperimentTaskSpec {
 	task: string;
 	goal: string;
 	max_revisions?: number;
+	fidelity?: { strategy: "full_only" | "multi_fidelity"; max_full: number };
 	budget: {
 		max_experiments: number;
 		wall_seconds: number;
@@ -38,12 +39,31 @@ export type ExperimentRole = "baseline" | "candidate";
 export interface TrainingReservation {
 	role: ExperimentRole;
 	steps: number;
+	stage?: TrainingStage;
+}
+export type TrainingStage = "smoke" | "proxy" | "full";
+export interface StageResult {
+	stage: TrainingStage;
+	protocol: string;
+	key: string;
+	result: RunResult;
+}
+export interface FidelityAdapter {
+	steps(stage: TrainingStage): number;
+	run(
+		candidate: Candidate,
+		reservation: TrainingReservation & { stage: TrainingStage },
+		signal: AbortSignal,
+	): Promise<StageResult>;
+	verify(candidate: Candidate, evidence: StageResult): Promise<void>;
+	score(evidence: StageResult): number;
 }
 
 export const proposalSchema = Type.Object(
 	{
 		content: Type.String({ maxLength: 8192 }),
 		rationale: Type.String({ minLength: 1, maxLength: 2000 }),
+		evidence: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
 		parameters: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 	},
 	{ additionalProperties: false },
@@ -72,6 +92,7 @@ export interface EvaluationProtocol {
 export type FailureCategory =
 	| "invalid_candidate"
 	| "domain_execution"
+	| "internal_error"
 	| "budget_exhausted"
 	| "permission_violation"
 	| "external_unknown"
@@ -114,6 +135,7 @@ export type WorkerOperation = {
 	script: string;
 	timeoutMs: number;
 	reservation?: TrainingReservation;
+	stage?: TrainingStage | "review";
 } & (
 	| { status: "pending" | "unknown"; identity?: WorkerIdentity }
 	| { status: "intent" | "not_started"; nonce: string }
@@ -133,6 +155,7 @@ export interface ExperimentAdapter {
 	config: string;
 	evaluation: EvaluationProtocol;
 	reportNotes: readonly string[];
+	fidelity?: FidelityAdapter;
 	trainingSteps(role: ExperimentRole): number;
 	prepare(
 		id: string,

@@ -103,7 +103,7 @@ test("EXP-061-02 a second adapter minimizes its own metric after typed failure a
 });
 
 test("EXP-061-03 permission, unknown side effects, invalid evidence and unexpected errors must stop", async t => {
-  for (const [content, category] of [["policy", "permission_violation"], ["unknown", "external_unknown"], ["101", "evidence_integrity"], ["unexpected", "domain_execution"]]) {
+  for (const [content, category] of [["policy", "permission_violation"], ["unknown", "external_unknown"], ["101", "evidence_integrity"], ["unexpected", "internal_error"]]) {
     const { task } = await fixture(t);
     await task.invoke("baseline", {});
     const result = await submit(task, content);

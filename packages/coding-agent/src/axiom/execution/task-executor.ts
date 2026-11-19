@@ -15,8 +15,11 @@ import {
 	type ExperimentDomain,
 	ExperimentFailure,
 	type ExperimentRole,
+	type FidelityAdapter,
 	type RunResult,
+	type StageResult,
 	type TrainingReservation,
+	type TrainingStage,
 	type WorkerOperation,
 } from "./experiment-domain.ts";
 import { type ProcessResult, runProcess, type WorkerIdentity } from "./process.ts";
@@ -24,15 +27,15 @@ import { BudgetStop, type TaskBudget } from "./task-budget.ts";
 import { parameterProposalSchema, REVIEW_NOTES, sha256, type TaskSpec, validateTaskSpec } from "./task-spec.ts";
 
 const hashSchema = Type.String({ pattern: "^[0-9a-f]{64}$" });
-const validationSchema = Type.Object({
+const validationFields = {
 	protocol: Type.Literal("tiny-xor-v1"),
 	split: Type.Literal("validation"),
-	level: Type.Literal("full"),
 	samples: Type.Literal(512),
 	accuracy: Type.Number({ minimum: 0, maximum: 1 }),
 	loss: Type.Number({ minimum: 0 }),
 	dataset_access_log: Type.Tuple([Type.Literal("validation")]),
-});
+};
+const validationSchema = Type.Object({ ...validationFields, level: Type.Literal("full") });
 const evidenceSchema = Type.Intersect([
 	validationSchema,
 	Type.Object({
@@ -45,6 +48,18 @@ const evaluatedSchema = Type.Object({
 	historySha256: hashSchema,
 	validation: evidenceSchema,
 });
+// 每一级的凭证绑定相同的可信评估器和各自的训练口径。
+const stagedEvidenceSchema = Type.Object({
+	model: Type.String(),
+	historySha256: hashSchema,
+	validation: Type.Object({
+		...validationFields,
+		level: Type.Union([Type.Literal("smoke"), Type.Literal("proxy"), Type.Literal("full")]),
+		checkpoint_sha256: hashSchema,
+		run_metadata_sha256: hashSchema,
+	}),
+});
+const fidelityProtocol = "tiny-xor-fidelity-v1";
 const reviewSchema = Type.Object({
 	status: Type.Literal("approved_by_narrow_policy"),
 	model_sha256: hashSchema,
@@ -129,6 +144,7 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 	original = "";
 	config = "";
 	readonly evaluation: EvaluationProtocol;
+	readonly fidelity?: FidelityAdapter;
 	readonly reportNotes = [
 		"Validation only, one seed. Recheck: python examples/tiny-ml-eval/validate_only.py --run <workspace>/best",
 		...REVIEW_NOTES,
@@ -154,6 +170,24 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		this.budget = budget;
 		this.spec = spec;
 		this.evaluation = tinyEvaluation(spec.version === 1 ? spec.target_accuracy : spec.objective.target);
+		if (spec.version === 3) {
+			this.fidelity = {
+				steps: (stage): number => this.stepsAt(stage),
+				run: (candidate, reservation, signal): Promise<StageResult> =>
+					this.runStage(candidate, reservation, signal),
+				verify: (candidate, evidence): Promise<void> => this.verifyStage(candidate, evidence),
+				score: (evidence): number => {
+					const result = evidence.result;
+					if (
+						evidence.stage !== "proxy" ||
+						!Check(stagedEvidenceSchema, result) ||
+						result.validation.level !== "proxy"
+					)
+						throw new ExperimentFailure("evidence_integrity", "Expected an independent proxy score");
+					return result.validation.accuracy;
+				},
+			};
+		}
 	}
 	async initialize(saved?: AdapterCheckpoint, commandCount = 0): Promise<void> {
 		if (!saved) for (const name of ["sources", "runs", "commands", "tmp"]) await mkdir(join(this.root, name));
@@ -177,7 +211,7 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 			// 只信任首次提交的输入身份；恢复时把候选绑定到任务内的固定路径。
 			if (saved.identity !== this.identity) throw new Error("Trusted inputs changed since task approval");
 			const configs = saved.configs ?? {};
-			if (Object.keys(configs).some((id) => !Object.hasOwn(saved.sources, id) || this.spec.version !== 2))
+			if (Object.keys(configs).some((id) => !Object.hasOwn(saved.sources, id) || this.spec.version === 1))
 				throw new ExperimentFailure("evidence_integrity", "Unexpected saved candidate configuration");
 			for (const [id, hash] of Object.entries(saved.sources)) {
 				if (!/^(baseline|exp-[1-9][0-9]*)$/.test(id)) throw new Error("Invalid saved candidate ID");
@@ -227,6 +261,7 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		signal: AbortSignal,
 		fingerprint?: string,
 		reservation?: TrainingReservation,
+		stage?: WorkerOperation["stage"],
 	): Promise<string> {
 		signal.throwIfAborted();
 		await this.verify();
@@ -234,7 +269,7 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		const computeRemaining = this.budget.spec.budget.compute_process_seconds * 1000 - this.budget.computeMs;
 		const timeoutMs = this.budget.processTimeout();
 		const argv = [join(this.repo, "examples/tiny-ml-eval", script), ...args];
-		const operation = { id: ++this.counter, runId, script, timeoutMs, fingerprint, reservation };
+		const operation = { id: ++this.counter, runId, script, timeoutMs, fingerprint, reservation, stage };
 		const nonce = randomUUID();
 		const recordCommand = this.recordCommand;
 		// 意图只允许启动等待中的监管器。提交 started 之前，目标脚本不能执行。
@@ -247,7 +282,7 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		const logLaunch = (): void => {
 			appendFileSync(
 				join(this.root, "events.jsonl"),
-				`${JSON.stringify({ type: "process_start", operation_id: operation.id, run_id: runId, script, args, identity, timestamp: new Date().toISOString() })}\n`,
+				`${JSON.stringify({ type: "process_start", operation_id: operation.id, run_id: runId, script, args, identity, stage, timestamp: new Date().toISOString() })}\n`,
 			);
 		};
 		if (!recordCommand) logLaunch();
@@ -317,7 +352,10 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 			if (!result.stopped && result.code === 1) {
 				if (script === "review_candidate.py" && result.stderr.startsWith("Candidate policy rejected:"))
 					throw new ExperimentFailure("invalid_candidate", message);
-				if (script === "experiment.py" && result.stderr.startsWith("Experiment failed:"))
+				if (
+					(script === "experiment.py" || script === "train.py") &&
+					/^(Experiment|Training) failed: Training produced nonfinite (loss|gradients)/.test(result.stderr)
+				)
 					throw new ExperimentFailure("domain_execution", message);
 			}
 			if (script === "validate_only.py") throw new ExperimentFailure("evidence_integrity", message);
@@ -328,12 +366,13 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 	}
 	// 默认值使用原始配置字节，保持旧指纹，并让显式默认值与省略参数去重。
 	private effectiveConfig(parameters: Record<string, unknown>): string {
-		const permitted = this.spec.version === 2 ? this.spec.parameters?.learning_rate : undefined;
+		const permitted = this.spec.version !== 1 ? this.spec.parameters?.learning_rate : undefined;
 		if (Object.keys(parameters).some((key) => key !== "learning_rate" || !permitted))
 			throw new ExperimentFailure("permission_violation", "Permission denied: unapproved candidate parameter");
 		if (!Check(parameterProposalSchema, parameters))
 			throw new ExperimentFailure("invalid_candidate", "Invalid learning_rate type or value");
 		const rate = parameters.learning_rate;
+		// 不提交覆盖时沿用可信默认值，即使搜索区间不包含该值。
 		if (rate === undefined) return this.config;
 		if (!permitted || rate < permitted.min || rate > permitted.max)
 			throw new ExperimentFailure("invalid_candidate", "learning_rate outside approved range");
@@ -364,7 +403,15 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		await writeVerified(join(source, "model.py"), content);
 		await writeVerified(join(source, "config.json"), config);
 		const review: unknown = JSON.parse(
-			await this.command(id, "review_candidate.py", ["--candidate", source], signal),
+			await this.command(
+				id,
+				"review_candidate.py",
+				["--candidate", source],
+				signal,
+				undefined,
+				undefined,
+				this.fidelity ? "review" : undefined,
+			),
 		);
 		if (!Check(reviewSchema, review) || review.model_sha256 !== sha256(content))
 			throw new ExperimentFailure("evidence_integrity", "Invalid architecture review evidence");
@@ -393,9 +440,68 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 	}
 	// 两个 Smoke 步和完整训练共享同一候选的预算预留。
 	trainingSteps(role: ExperimentRole): number {
+		return this.stepsAt("full") + (role === "baseline" ? 0 : 2);
+	}
+
+	private stepsAt(stage: TrainingStage): number {
 		const { epochs } = JSON.parse(this.config) as { epochs: number };
 		if (!Number.isSafeInteger(epochs) || epochs < 1 || epochs > 120) throw new Error("Invalid fixed training config");
-		return epochs + (role === "baseline" ? 0 : 2);
+		return stage === "smoke" ? 2 : stage === "proxy" ? Math.min(20, epochs) : epochs;
+	}
+
+	// L1、L2 和 L3 分别使用独立目录与键，L3 保留历史交付所需的目录形状。
+	private async runStage(
+		candidate: Candidate,
+		reservation: TrainingReservation & { stage: TrainingStage },
+		signal: AbortSignal,
+	): Promise<StageResult> {
+		const { stage } = reservation;
+		if (
+			this.sources[candidate.id] !== sha256(candidate.content) ||
+			(this.configs[candidate.id] ?? sha256(this.config)) !== sha256(candidate.config ?? this.config)
+		)
+			throw new ExperimentFailure("evidence_integrity", "Unknown immutable staged candidate");
+		const key = this.stageKey(candidate, stage);
+		const run = this.stageDirectory(candidate.id, stage);
+		await this.command(
+			candidate.id,
+			"train.py",
+			["--candidate", join(this.root, "sources", candidate.id), "--output", run, "--level", stage],
+			signal,
+			key,
+			reservation,
+			stage,
+		);
+		const result = await this.evaluateRun(candidate, run, signal, key, stage);
+		const evidence = { stage, protocol: fidelityProtocol, key, result };
+		await this.verifyStage(candidate, evidence);
+		return evidence;
+	}
+
+	private stageKey(candidate: Candidate, stage: TrainingStage): string {
+		return sha256(JSON.stringify([fidelityProtocol, candidate.fingerprint, stage]));
+	}
+
+	private stageDirectory(id: string, stage: TrainingStage): string {
+		return join(this.root, "runs", stage === "full" ? id : `${id}-${stage}`);
+	}
+
+	private async verifyStage(candidate: Candidate, evidence: StageResult): Promise<void> {
+		if (
+			evidence.protocol !== fidelityProtocol ||
+			evidence.key !== this.stageKey(candidate, evidence.stage) ||
+			evidence.result.fingerprint !== candidate.fingerprint ||
+			evidence.result.id !== candidate.id ||
+			evidence.result.run !== this.stageDirectory(candidate.id, evidence.stage) ||
+			!Check(stagedEvidenceSchema, evidence.result) ||
+			evidence.result.validation.level !== evidence.stage
+		)
+			throw new ExperimentFailure("evidence_integrity", "Invalid saved fidelity evidence");
+		try {
+			await this.verifyEvidence(evidence.result, evidence.result.run);
+		} catch (error) {
+			throw new ExperimentFailure("evidence_integrity", String(error));
+		}
 	}
 
 	async run(prepared: Candidate, reservation: TrainingReservation, signal: AbortSignal): Promise<RunResult> {
@@ -410,12 +516,31 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		const args = ["--candidate", source, "--output", run];
 		if (!baseline) args.push("--smoke-output", join(this.root, "runs", `${prepared.id}-smoke`));
 		await this.command(prepared.id, "experiment.py", args, signal, prepared.fingerprint, reservation);
+		const result = await this.evaluateRun(prepared, run, signal, prepared.fingerprint);
+		try {
+			await this.verifyEvaluated(result);
+		} catch (error) {
+			throw new ExperimentFailure("evidence_integrity", String(error));
+		}
+		return result;
+	}
+
+	// 各级评分均独立加载 checkpoint，并绑定训练历史和有效配置。
+	private async evaluateRun(
+		prepared: Candidate,
+		run: string,
+		signal: AbortSignal,
+		key: string,
+		stage?: TrainingStage,
+	): Promise<RunResult & { model: string; historySha256: string }> {
 		const output = await this.command(
 			prepared.id,
 			"validate_only.py",
 			["--run", run, "--output", join(run, "validation.json")],
 			signal,
-			prepared.fingerprint,
+			key,
+			undefined,
+			stage,
 		);
 		let validation: unknown;
 		try {
@@ -423,11 +548,11 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		} catch {
 			throw new ExperimentFailure("evidence_integrity", "Invalid independent validation JSON");
 		}
-		if (!Check(evidenceSchema, validation))
+		if (!Check(stagedEvidenceSchema.properties.validation, validation) || validation.level !== (stage ?? "full"))
 			throw new ExperimentFailure("evidence_integrity", "Invalid independent validation evidence");
 		// 把训练历史也绑定到成功记录，恢复时和 Checkpoint 一起核验。
 		const historySha256 = sha256(await readFile(join(run, "history.json")));
-		const result = {
+		return {
 			validation,
 			run,
 			model: prepared.content,
@@ -435,12 +560,6 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 			id: prepared.id,
 			historySha256,
 		};
-		try {
-			await this.verifyEvaluated(result);
-		} catch (error) {
-			throw new ExperimentFailure("evidence_integrity", String(error));
-		}
-		return result;
 	}
 	// 复用与交付使用同一套哈希检查，不能仅靠文件存在判断实验完成。
 	async verifyEvaluated(
@@ -450,6 +569,12 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		if (!/^(baseline|exp-[1-9][0-9]*)$/.test(best.id) || best.run !== join(this.root, "runs", best.id))
 			throw new Error("Invalid evaluated run identity");
 		if (!Check(evaluatedSchema, best)) throw new ExperimentFailure("evidence_integrity", "Invalid saved evaluation");
+		return this.verifyEvidence(best, directory);
+	}
+
+	private async verifyEvidence(best: RunResult, directory: string): Promise<Record<string, string>> {
+		if (!Check(stagedEvidenceSchema, best))
+			throw new ExperimentFailure("evidence_integrity", "Invalid saved stage evaluation");
 		await this.verify();
 		const checkpoint = await readFile(join(directory, "checkpoint.pt"));
 		if (sha256(checkpoint) !== best.validation.checkpoint_sha256)

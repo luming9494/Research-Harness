@@ -1,5 +1,13 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-06.2 分级评估验收
+
+真实 DeepSeek Flash 经原生 Pi RPC 依次提出三个不同候选，并在第二、三轮引用此前的 Proxy 和 Full 反馈。三个候选均晋级，最终交付首个达到 0.998046875 Full accuracy 的候选，交付权重独立重载一致。Pi 记录 5 次请求、23,513 Token、估算费用 USD 0.004361304。固定候选池对照与故障回归单独运行。[WP-06.2 多保真验收记录](AXIOM_MULTI_FIDELITY.md)
+
+固定池对照的两次运行均剪掉两个候选，候选 Full 次数从 4 降为 2，训练步数从 400 降为 328，最佳 Full accuracy 和权重哈希一致。Windows 重跑的墙钟从 88.22 秒增至 185.53 秒。跨进程用例确认已提交的 Proxy 与晋级记录可复用，第二轮 Full 授权不明时保留 80 步并停止。[对照和恢复证据](AXIOM_MULTI_FIDELITY.md)
+
+Windows 上离线构建、静态检查、分级定向测试和全量 ML **94/94** 通过。真实模型验收与离线回归分别记账。
+
 ## WP-06.1 真实模型验收
 
 原生 Pi CLI/RPC 以单候选、162 训练步和 60,000 Token 准入预算运行 `deepseek/deepseek-flash`，供应商自动重试关闭。模型按顺序调用 inspect、baseline、candidate，自行提出 8 单元 ReLU 隐层和审批范围内的 `learning_rate=0.05`。基线准确率 0.5，候选独立 validation 准确率 **0.998046875**，loss **0.004902488552033901**。达到候选上限后交付 `exp-1`，重新加载 `best/` 复验相同指标及权重 SHA-256 `3a2e1066e1780cdfd01afcce2155312def1eaa447fa30999b232d45217d53374`。

@@ -78,8 +78,30 @@ const current = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+// v3 单独审批分级策略和完整训练名额，旧版预算继续按原规则解释。
+const staged = Type.Object(
+	{
+		...current.properties,
+		version: Type.Literal(3),
+		budget: Type.Object(
+			{
+				...common.budget.properties,
+				max_experiments: Type.Integer({ minimum: 1, maximum: 8 }),
+			},
+			{ additionalProperties: false },
+		),
+		fidelity: Type.Object(
+			{
+				strategy: Type.Union([Type.Literal("full_only"), Type.Literal("multi_fidelity")]),
+				max_full: Type.Integer({ minimum: 1, maximum: 8 }),
+			},
+			{ additionalProperties: false },
+		),
+	},
+	{ additionalProperties: false },
+);
 
-export type TaskSpec = ExperimentTaskSpec & (Static<typeof legacy> | Static<typeof current>);
+export type TaskSpec = ExperimentTaskSpec & (Static<typeof legacy> | Static<typeof current> | Static<typeof staged>);
 export const parameterProposalSchema = Type.Object(
 	{ learning_rate: Type.Optional(learningRate) },
 	{ additionalProperties: false },
@@ -87,9 +109,15 @@ export const parameterProposalSchema = Type.Object(
 
 export function validateTaskSpec(value: unknown): TaskSpec {
 	if (Check(legacy, value)) return structuredClone(value);
-	if (!Check(current, value))
+	if (!Check(current, value) && !Check(staged, value))
 		throw new Error("Invalid Tiny TaskSpec: expected exact fields and bounded values; cannot relax trusted policy");
 	const range = value.parameters?.learning_rate;
+	if (
+		value.version === 3 &&
+		(value.fidelity.max_full > value.budget.max_experiments ||
+			(value.fidelity.strategy === "full_only" && value.fidelity.max_full !== value.budget.max_experiments))
+	)
+		throw new Error("Invalid full training budget for fidelity strategy");
 	if (range && range.min > range.max) throw new Error("Invalid approved learning_rate range");
 	return structuredClone(value);
 }

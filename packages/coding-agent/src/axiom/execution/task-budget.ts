@@ -1,5 +1,5 @@
 // Accounts for Tiny Task execution and native Pi usage; admission estimates are not billing guarantees.
-import type { ExperimentTaskSpec } from "./experiment-domain.ts";
+import type { ExperimentTaskSpec, TrainingReservation } from "./experiment-domain.ts";
 
 export type BudgetReason =
 	| "wall_budget_exhausted"
@@ -78,11 +78,19 @@ export class TaskBudget {
 		this.trainingSteps += steps;
 	}
 	// 仅在账本证明没有发出启动许可时调用，恢复事务确保不会返还两次。
-	releaseUnstarted(reservation: { role: "baseline" | "candidate"; steps: number }): void {
-		if (reservation.steps > this.trainingSteps || (reservation.role === "candidate" && this.experiments < 1))
+	releaseUnstarted(reservation: TrainingReservation): void {
+		const countsExperiment = reservation.role === "candidate" && reservation.stage === undefined;
+		if (reservation.steps > this.trainingSteps || (countsExperiment && this.experiments < 1))
 			throw new Error("Unstarted operation exceeds saved reservation");
-		if (reservation.role === "candidate") this.experiments--;
+		if (countsExperiment) this.experiments--;
 		this.trainingSteps -= reservation.steps;
+	}
+	// v3 的提案数与阶段预算分开，已消耗阶段不会因剪枝返还。
+	reserveStage(steps: number): void {
+		this.check();
+		if (this.trainingSteps + steps > this.spec.budget.training_steps)
+			throw new BudgetStop("training_step_budget_exhausted");
+		this.trainingSteps += steps;
 	}
 	processTimeout(): number {
 		this.check();

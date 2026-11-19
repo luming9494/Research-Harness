@@ -3,11 +3,13 @@
 > 2026-11-06 · 此文区分**已提交代码**与**已在新工程验证的功能**。  
 > 来源：旧公开仓库 [luming9494/AXIOM](https://github.com/luming9494/AXIOM)。目标：完整 Pi 源码仓库 [Research-Harness](https://github.com/luming9494/Research-Harness)。
 
+本文保留 WP-01～04 的迁移决策。当前产品方向为面向自主科研的自进化 Agent Harness。新增 WP-05 运行时验证和后续双闭环能力见 [开发计划](AXIOM_DEVELOPMENT_PLAN.md)。
+
 ## 1. 原则
 
 - **新仓库以下载的 Pi 源码为 Git 根**，不再嵌套 vendor/pi submodule；不得将旧 AXIOM 的独立 CLI/SDK 封装复制成另一个 Agent 产品。
 - Pi 1.5.0 的模型配置、Session、TUI、Agent Loop、Extensions、Compaction 和 Skills 为主要基础能力。
-- AXIOM 仅迁移机器学习业务所需代码：实验约束、受控候选、Python Runner 接口、独立评估、指标与产物。
+- 本阶段迁移首个机器学习场景所需代码，包括实验约束、受控候选、Python Runner 接口、独立评估、指标与产物。
 - 所有未发表研究、真实日志/权重、凭据和本机私有目录严格不进入公开仓库。
 - **不可将“代码已复制”与“端到端已验收通过”混为一谈**。
 
@@ -84,6 +86,12 @@ npm run axiom -- --tui-mode regular
 
 此迁移阶段使用无费用回归和真实 CPU 校准。后续真实模型验收另见上节。跨会话恢复、远程 GPU 和 NIM 回退仍待实现。
 
-## 7. Source licensing
+## 7. WP-05 与后续实现分工
+
+Pi Durable 提供持久任务、检查点和重启调度。AXIOM 在其上实现科研任务身份、单写者保护、预算预留和外部作业对账。Windows 上的真实进程测试已验证运行时单写者与强制终止后的任务恢复。当前测试通过模拟外部操作证明防重，实验账本、原生 CLI 恢复和 Slurm 作业接管仍需各自验收。[WP-05 运行时验证](AXIOM_WP05_RUNTIME.md)
+
+后续的策略配置、独立发布评测、科研任务记忆和 Run Manifest 都在 AXIOM 领域层实现。通用模型调用、工具调度与上下文压缩沿用 Pi。
+
+## 8. Source licensing
 
 Pi 上游的 MIT LICENSE 与原作者版权必须保留；新 README 明确指出本项目为 Pi 源码衍生项目。对于没有重新编译和测试的源码，不得标注已验证。

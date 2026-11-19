@@ -63,6 +63,16 @@ Research-Harness/
 
 扩展入口**不创建新的 Pi Session、readline 或模型流包装**。单候选和多轮 ML 领域状态在 AXIOM 自己的 Controller 中；Pi 仍保存真正的会话。
 
+## 开发用 Pi 与本仓库 AXIOM 完全分开启动
+
+在本仓库目录执行裸命令 `pi`，运行的是你在系统 PATH 中安装的**开发工具 Pi**（可通过 Windows `where.exe pi` 查询），不代表正在运行本仓库的 Pi 源码。
+
+- **开发工具**：直接 `pi`，使用全局安装版本；AXIOM 扩展已移出自动发现的 `.pi/extensions/`，不会因为没有构建本仓库而触发加载错误。
+- **AXIOM 项目**：在仓库根目录 `npm run axiom`，使用**本仓库编译出的 Pi CLI**，显式加载 `axiom/extensions/axiom-tiny.ts`，并启用 `regular` 终端模式。
+- **无扩展排查**：`pi -ne` 禁用开发工具的自动扩展；`npm run build` 负责产生 `packages/coding-agent/dist/axiom/` 下的 AXIOM 模块。
+
+开发工具和 AXIOM 启动器默认使用各自的持久配置与会话目录，具体路径见下方配置表。两者在同一工作目录启动时仍访问同一份源码，请用 Git 管理文件变更。
+
 ## 在 Windows / VS Code 中体验（Tiny Task）
 
 要求：Node.js >=22.19，Python 虚拟环境含 PyTorch（CPU 即可）。Research-Harness 的凭据使用下述独立登录命令配置，不复用全局开发 Pi 的凭据文件。

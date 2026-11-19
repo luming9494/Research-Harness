@@ -21,7 +21,7 @@
 | `src/research.ts` 与 `src/table.ts` | `packages/coding-agent/src/axiom/` | 实验清单和数据表输出 |
 | `examples/tiny-ml-*` | 根目录 `examples/tiny-ml-*` | PyTorch 合成任务、评估/审查脚本 |
 | `tests/python` / `tests/fixtures` | 根目录对应路径 | Python 回归与合成参考结构 |
-| 原 Agent 工具编排 | `axiom/extensions/axiom-tiny.ts` | **新写的 Pi 原生桥接**，未复制重复 SDK 初始化 |
+| 原 Agent 工具编排 | `axiom/extensions/axiom-tiny.ts` | 由 AXIOM 启动器显式加载的 Pi 原生桥接，避免被开发用 Pi 自动发现 |
 | 新版 Node 策略测试 | `tests/axiom/decision.test.mjs` | 单轮决策确定性测试 |
 | 本地 `src/execution/task-spec.ts`、`task-budget.ts` | `packages/coding-agent/src/axiom/execution/task-{spec,budget}.ts` | 固定 TaskSpec、原子训练预算准入、原生 usage 结算 |
 | 本地 `task-executor.ts`、`task-controller.ts` | `packages/coding-agent/src/axiom/execution/task-{executor,controller}.ts` | 可信 CPU worker、AST 去重、独立验证、历史最佳、串行取消和确定性交付；Controller 改为原生工具驱动，不迁旧 propose/模型循环 |
@@ -41,7 +41,7 @@
 
 ## 4. 新入口的明确能力边界
 
-`/axiom-tiny`：在 Pi 原生会话中，通过人工同意创建受控 Tiny Task，暂时只开放九个 namespaced ML 工具；自动禁用普通 Pi 工具以便不绕过限定的任务动作。
+`/axiom-tiny`：在通过 `npm run axiom` 启动的 Pi 原生会话中，通过人工同意创建受控 Tiny Task，暂时只开放九个 namespaced ML 工具；自动禁用普通 Pi 工具以便不绕过限定的任务动作。
 
 **仍不是 OS 沙箱**：Pi 扩展/用户账号具备本地进程权限，不能用这套 Tiny 安全策略运行来源不明的训练仓库。训练与来源 SHA、AST 策略适用于固定可信任务。
 

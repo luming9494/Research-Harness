@@ -27,11 +27,17 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
   let registered = false;
   const close = async () => {
     if (!active || !task) return;
-    task.markUsageUnknown();
-    await task.stop("user_cancelled");
-    pi.setActiveTools(prior);
-    active = false;
-    await task.closeLedger();
+    // 即使账本提交失败，也要同步关闭准入并释放会话持有的锁。
+    const controller = task;
+    const stopping = controller.stop("user_cancelled");
+    try {
+      await stopping;
+      await controller.markUsageUnknown();
+    } finally {
+      pi.setActiveTools(prior);
+      active = false;
+      await controller.closeLedger();
+    }
   };
   pi.on("session_shutdown", close);
   pi.on("tool_call", event => {
@@ -76,7 +82,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
   pi.on("agent_settled", async event => {
     if (!active || !task) return;
     const pending = task.budget.pendingUsage;
-    if (pending) task.markUsageUnknown();
+    if (pending) await task.markUsageUnknown();
     if (!task.stopped && (event.aborted || pending)) await task.stop(event.aborted ? "user_cancelled" : "token_usage_uncertain");
     await task.checkpoint();
   });
@@ -151,10 +157,12 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       if (active && task) {
         const stopping = task.stop("user_cancelled");
         ctx.abort();
-        await ctx.waitForIdle();
-        await stopping;
+        try {
+          await Promise.all([ctx.waitForIdle(), stopping]);
+        } finally {
+          await close();
+        }
       }
-      await close();
       ctx.ui.notify(`AXIOM task closed. Evidence: ${task?.root ?? "none"}`, "info");
     },
   });

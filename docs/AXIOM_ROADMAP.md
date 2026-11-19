@@ -15,7 +15,8 @@ AXIOM 是面向自主科研的自进化 Agent Harness。机器学习是首个场
 | WP-02 | 原生 Session/faux 工具注册、权限、Smoke、取消和工具恢复通过 | 保持原生工具回归 |
 | WP-03 | 人工候选的真实训练、独立验证、keep 与失败 revert 通过 | 不将人工候选验收称作模型自主优化 |
 | WP-04 | 可信 Tiny CPU 多轮内核已迁入，两阶段真实 LLM 主流程经原生 RPC 验收通过 | 补齐终端 TUI 人工验收，保留较差、平分和失败候选的离线回归 |
-| WP-05.2 | Tiny CPU 实验账本与原生恢复入口已接入，真实 CPU 跨进程恢复已验收。[恢复验证](AXIOM_WP05_RUNTIME.md) | 等待独立代码审阅。后续将现有恢复与防重用例纳入 AXIOM-Bench |
+| WP-05.2 | Tiny CPU 实验账本与原生恢复入口已接入，真实 CPU 跨进程恢复已验收，独立静态代码审阅已通过。[恢复验证](AXIOM_WP05_RUNTIME.md) | 后续将现有恢复与防重用例纳入 AXIOM-Bench |
+| WP-05.3 | 在 WP-05.2 上强化进程租约、未知状态、终态预算和可恢复交付。[故障用例](AXIOM_WP05_RUNTIME.md#故障用例记录) | 等待独立代码审阅。Linux 真实运行另行验收 |
 | 后续 | 规划中 | 第二类 AI 任务、跨任务评测、Ablate、Reproduce 和远程 GPU Runner |
 
 ## 两个优化循环

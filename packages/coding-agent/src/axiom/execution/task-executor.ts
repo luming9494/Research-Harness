@@ -1,9 +1,10 @@
 // Migrated Tiny Task CPU executor and evidence-preserving delivery from local AXIOM WP-04.
+import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { copyFile, lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { copyFile, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTwoFilesPatch } from "diff";
-import { runProcess } from "./process.ts";
+import { type ProcessResult, runProcess, type WorkerIdentity } from "./process.ts";
 import type { ValidationResult } from "./smoke-workspace.ts";
 import { BudgetStop, type TaskBudget } from "./task-budget.ts";
 import { sha256 } from "./task-spec.ts";
@@ -29,10 +30,14 @@ export type WorkerOperation = {
 	fingerprint?: string;
 	script: string;
 	timeoutMs: number;
+	reservation?: { role: "baseline" | "candidate"; steps: number };
 } & (
-	| { status: "pending" }
+	| { status: "pending" | "unknown"; identity?: WorkerIdentity }
+	| { status: "intent" | "not_started"; nonce: string }
+	| { status: "started"; identity: WorkerIdentity }
 	| {
-			status: "completed";
+			status: "completed" | "failed";
+			identity?: WorkerIdentity;
 			elapsedMs: number;
 			exitCode: number | null;
 			stopped: Awaited<ReturnType<typeof runProcess>>["stopped"];
@@ -42,6 +47,7 @@ export type WorkerOperation = {
 
 export interface ExecutorCheckpoint {
 	identity: string;
+	supervisorSha256?: string;
 	sources: Record<string, string>;
 }
 export interface TaskExecutor {
@@ -61,6 +67,36 @@ const scripts = [
 	"validate_only.py",
 	"experiment.py",
 ];
+
+// 保留崩溃前已创建的相同文件，拒绝覆盖与可信输入不一致的文件。
+async function writeVerified(path: string, content: string): Promise<void> {
+	try {
+		await writeFile(path, content, { flag: "wx" });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		if ((await readFile(path, "utf8")) !== content) throw new Error(`Existing snapshot changed: ${path}`);
+	}
+}
+
+const deliveryFiles = [
+	"checkpoint.pt",
+	"run.json",
+	"history.json",
+	"validation.json",
+	"candidate/model.py",
+	"candidate/config.json",
+];
+
+// 只有经过核验的完整副本才能出现在最终路径，链接不覆盖已有证据。
+async function publishFile(source: string, destination: string): Promise<void> {
+	try {
+		await link(source, destination);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		if (sha256(await readFile(source)) !== sha256(await readFile(destination)))
+			throw new Error(`Existing delivery changed: ${destination}`);
+	}
+}
 export class CpuTaskExecutor implements TaskExecutor {
 	original = "";
 	config = "";
@@ -69,8 +105,10 @@ export class CpuTaskExecutor implements TaskExecutor {
 	private launched = new Set<string>();
 	private counter = 0;
 	private identity = "";
+	private supervisorSha256?: string;
 	private sources: Record<string, string> = {};
 	recordCommand?: (operation: WorkerOperation) => Promise<void>;
+	recordPublishedBest?: () => Promise<void>;
 	readonly repo: string;
 	readonly root: string;
 	readonly python: string;
@@ -92,6 +130,12 @@ export class CpuTaskExecutor implements TaskExecutor {
 		])
 			this.trusted.set(path, sha256(await readFile(path)));
 		this.identity = sha256(JSON.stringify([...this.trusted]));
+		// 单独绑定监管脚本，保留已确认的 WP-05.2 候选指纹。
+		const supervisor = join(this.repo, "examples/tiny-ml-eval/supervise.py");
+		this.supervisorSha256 = sha256(await readFile(supervisor));
+		if (saved?.supervisorSha256 && saved.supervisorSha256 !== this.supervisorSha256)
+			throw new Error("Worker supervisor changed since task approval");
+		this.trusted.set(supervisor, this.supervisorSha256);
 		if (saved) {
 			// 只信任首次提交的输入身份；恢复时把候选绑定到任务内的固定路径。
 			if (saved.identity !== this.identity) throw new Error("Trusted inputs changed since task approval");
@@ -112,10 +156,10 @@ export class CpuTaskExecutor implements TaskExecutor {
 	}
 	// 运行记录使用账本里的序号，进程重启后不会覆盖既有命令文件。
 	checkpoint(): ExecutorCheckpoint {
-		return { identity: this.identity, sources: { ...this.sources } };
+		return { identity: this.identity, supervisorSha256: this.supervisorSha256, sources: { ...this.sources } };
 	}
 
-	async verifyCommand(operation: Extract<WorkerOperation, { status: "completed" }>): Promise<void> {
+	async verifyCommand(operation: Extract<WorkerOperation, { recordSha256: string }>): Promise<void> {
 		const path = join(this.root, "commands", `${String(operation.id).padStart(3, "0")}.json`);
 		if (sha256(await readFile(path)) !== operation.recordSha256) throw new Error("Worker evidence changed");
 	}
@@ -132,6 +176,7 @@ export class CpuTaskExecutor implements TaskExecutor {
 		args: string[],
 		signal: AbortSignal,
 		fingerprint?: string,
+		reservation?: { role: "baseline" | "candidate"; steps: number },
 	): Promise<string> {
 		signal.throwIfAborted();
 		await this.verify();
@@ -139,18 +184,24 @@ export class CpuTaskExecutor implements TaskExecutor {
 		const computeRemaining = this.budget.spec.budget.compute_process_seconds * 1000 - this.budget.computeMs;
 		const timeoutMs = this.budget.processTimeout();
 		const argv = [join(this.repo, "examples/tiny-ml-eval", script), ...args];
-		const operation = { id: ++this.counter, runId, script, timeoutMs, fingerprint };
-		// 进程可能在启动后、收到退出状态前崩溃，先提交意图，再创建进程。
-		await this.recordCommand?.({ ...operation, status: "pending" });
+		const operation = { id: ++this.counter, runId, script, timeoutMs, fingerprint, reservation };
+		const nonce = randomUUID();
+		const recordCommand = this.recordCommand;
+		// 意图只允许启动等待中的监管器。提交 started 之前，目标脚本不能执行。
+		await recordCommand?.({ ...operation, status: "intent", nonce });
 		signal.throwIfAborted();
 		this.budget.check();
 		const start = performance.now();
 		const id = String(operation.id).padStart(3, "0");
-		appendFileSync(
-			join(this.root, "events.jsonl"),
-			`${JSON.stringify({ type: "process_start", operation_id: operation.id, run_id: runId, script, args, timestamp: new Date().toISOString() })}\n`,
-		);
-		let result: Awaited<ReturnType<typeof runProcess>>;
+		let identity: WorkerIdentity | undefined;
+		const logLaunch = (): void => {
+			appendFileSync(
+				join(this.root, "events.jsonl"),
+				`${JSON.stringify({ type: "process_start", operation_id: operation.id, run_id: runId, script, args, identity, timestamp: new Date().toISOString() })}\n`,
+			);
+		};
+		if (!recordCommand) logLaunch();
+		let result: ProcessResult;
 		let elapsedMs = 0;
 		try {
 			result = await runProcess(this.python, argv, {
@@ -158,16 +209,35 @@ export class CpuTaskExecutor implements TaskExecutor {
 				home: join(this.root, "tmp"),
 				signal,
 				timeoutMs: Math.min(timeoutMs, this.budget.processTimeout()),
+				lease: recordCommand && {
+					entry: join(this.repo, "examples/tiny-ml-eval/supervise.py"),
+					nonce,
+					authorize: async (worker): Promise<void> => {
+						signal.throwIfAborted();
+						this.budget.check();
+						await recordCommand({ ...operation, status: "started", identity: worker });
+						identity = worker;
+						logLaunch();
+					},
+				},
 			});
 		} finally {
 			elapsedMs = performance.now() - start;
 			this.budget.computeMs += elapsedMs;
 		}
-		const record = JSON.stringify({ ...operation, args: argv, ...result }, null, 2);
+		const record = JSON.stringify({ ...operation, identity, args: argv, ...result }, null, 2);
 		await writeFile(join(this.root, "commands", `${id}.json`), record, { flag: "wx" });
-		await this.recordCommand?.({
+		if (recordCommand && !identity) {
+			// 监管器已经退出且未授权目标。只有可证明未启动时才返还训练预留。
+			if (reservation) this.budget.releaseUnstarted(reservation);
+			await recordCommand({ ...operation, status: "not_started", nonce });
+			if (signal.aborted) signal.throwIfAborted();
+			throw new Error(`Python supervisor did not authorize ${script}: ${result.stderr}`);
+		}
+		await recordCommand?.({
 			...operation,
-			status: "completed",
+			identity,
+			status: result.code === 0 && !result.stopped ? "completed" : "failed",
 			elapsedMs,
 			exitCode: result.code,
 			stopped: result.stopped,
@@ -207,9 +277,10 @@ export class CpuTaskExecutor implements TaskExecutor {
 		)
 			throw new Error("Invalid candidate proposal");
 		const source = join(this.root, "sources", id);
-		await mkdir(source);
-		await writeFile(join(source, "model.py"), content, { flag: "wx" });
-		await writeFile(join(source, "config.json"), this.config, { flag: "wx" });
+		// 未启动的基线可重做只读审查；已有源码必须和已批准的输入完全一致。
+		await mkdir(source, { recursive: true });
+		await writeVerified(join(source, "model.py"), content);
+		await writeVerified(join(source, "config.json"), this.config);
 		const review = JSON.parse(await this.command(id, "review_candidate.py", ["--candidate", source], signal)) as {
 			architecture_sha256?: unknown;
 		};
@@ -229,13 +300,10 @@ export class CpuTaskExecutor implements TaskExecutor {
 		this.sources[id] = sha256(content);
 		for (const name of ["model.py", "config.json"])
 			this.trusted.set(join(source, name), sha256(await readFile(join(source, name))));
-		await writeFile(join(source, "proposal.json"), JSON.stringify({ ...prepared, policy: review }, null, 2), {
-			flag: "wx",
-		});
-		await writeFile(
+		await writeVerified(join(source, "proposal.json"), JSON.stringify({ ...prepared, policy: review }, null, 2));
+		await writeVerified(
 			join(source, "patch.diff"),
 			createTwoFilesPatch("baseline/model.py", `${id}/model.py`, this.original, content),
-			{ flag: "wx" },
 		);
 		return prepared;
 	}
@@ -252,11 +320,12 @@ export class CpuTaskExecutor implements TaskExecutor {
 		const source = join(this.root, "sources", prepared.id);
 		const { epochs } = JSON.parse(this.config) as { epochs: number };
 		if (!Number.isSafeInteger(epochs) || epochs < 1 || epochs > 120) throw new Error("Invalid fixed training config");
-		this.budget.launch(role, epochs + (baseline ? 0 : 2));
+		const reservation = { role, steps: epochs + (baseline ? 0 : 2) };
+		this.budget.launch(role, reservation.steps);
 		this.launched.add(prepared.fingerprint);
 		const args = ["--candidate", source, "--output", run];
 		if (!baseline) args.push("--smoke-output", join(this.root, "runs", `${prepared.id}-smoke`));
-		await this.command(prepared.id, "experiment.py", args, signal, prepared.fingerprint);
+		await this.command(prepared.id, "experiment.py", args, signal, prepared.fingerprint, reservation);
 		const validation = JSON.parse(
 			await this.command(
 				prepared.id,
@@ -337,44 +406,70 @@ export class CpuTaskExecutor implements TaskExecutor {
 		for (const [file, hash] of Object.entries(expected)) {
 			if (sha256(await readFile(join(this.root, file))) !== hash) throw new Error(`Delivered ${file} changed`);
 		}
+		if (delivery.manifest === "delivery.json") {
+			// 标记最后发布。旧版已经结算的交付没有标记，仍按上面的哈希核验。
+			if ((await readFile(join(this.root, "delivery.json"), "utf8")) !== JSON.stringify(delivery, null, 2))
+				throw new Error("Delivery manifest changed");
+			if (sha256(await readFile(join(this.root, "patch.diff"))) !== delivery.patch_sha256)
+				throw new Error("Delivered patch changed");
+		}
 	}
 
 	async deliver(best: Evaluated): Promise<Record<string, unknown>> {
 		const hashes = await this.verifyEvaluated(best);
 		const destination = join(this.root, "best");
-		await mkdir(destination);
-		await mkdir(join(destination, "candidate"));
-		for (const name of [
-			"checkpoint.pt",
-			"run.json",
-			"history.json",
-			"validation.json",
-			"candidate/model.py",
-			"candidate/config.json",
-		])
-			await copyFile(join(best.run, name), join(destination, name));
-		await copyFile(join(destination, "checkpoint.pt"), join(this.root, "best_model.pt"));
-		await copyFile(join(destination, "candidate/model.py"), join(this.root, "model.py"));
-		await copyFile(join(destination, "candidate/config.json"), join(this.root, "config.json"));
-		if (sha256(await readFile(join(this.root, "best_model.pt"))) !== best.validation.checkpoint_sha256)
-			throw new Error("Delivery checkpoint hash mismatch");
-		await writeFile(
-			join(this.root, "patch.diff"),
-			createTwoFilesPatch("baseline/model.py", "best/model.py", this.original, best.model),
-			{ flag: "wx" },
-		);
-		return {
+		const staging = await mkdtemp(join(this.root, ".delivery-"));
+		const stagedBest = join(staging, "best");
+		const patch = createTwoFilesPatch("baseline/model.py", "best/model.py", this.original, best.model);
+		const delivery = {
 			best_id: best.id,
 			fingerprint: best.fingerprint,
 			model_sha256: hashes["model.py"],
 			config_sha256: hashes["config.json"],
-			validation_sha256: sha256(await readFile(join(destination, "validation.json"))),
+			validation_sha256: sha256(await readFile(join(best.run, "validation.json"))),
 			accuracy: best.validation.accuracy,
 			checkpoint_sha256: best.validation.checkpoint_sha256,
 			model: "model.py",
 			config: "config.json",
 			checkpoint: "best_model.pt",
 			independently_evaluated_run: "best/",
+			manifest: "delivery.json",
+			patch_sha256: sha256(patch),
 		};
+		try {
+			// 先在同一文件系统内完成复制和核验，再原子发布 best 目录。
+			const existing = await lstat(destination).catch((error: NodeJS.ErrnoException) => {
+				if (error.code !== "ENOENT") throw error;
+				return undefined;
+			});
+			if (!existing) {
+				await mkdir(join(stagedBest, "candidate"), { recursive: true });
+				for (const name of deliveryFiles) await copyFile(join(best.run, name), join(stagedBest, name));
+				await this.verifyEvaluated(best, stagedBest);
+				await rename(stagedBest, destination);
+			} else {
+				if (!existing.isDirectory() || existing.isSymbolicLink()) throw new Error("Invalid best directory");
+				await this.verifyEvaluated(best, destination);
+			}
+			// 已发布的同内容副本可复用；中断后只补缺失文件，最后才发布提交标记。
+			await this.recordPublishedBest?.();
+			for (const [path, alias] of [
+				["checkpoint.pt", "best_model.pt"],
+				["candidate/model.py", "model.py"],
+				["candidate/config.json", "config.json"],
+			]) {
+				await copyFile(join(destination, path), join(staging, alias));
+				await publishFile(join(staging, alias), join(this.root, alias));
+			}
+			await writeFile(join(staging, "patch.diff"), patch);
+			await publishFile(join(staging, "patch.diff"), join(this.root, "patch.diff"));
+			await writeFile(join(staging, "delivery.json"), JSON.stringify(delivery, null, 2));
+			await publishFile(join(staging, "delivery.json"), join(this.root, "delivery.json"));
+			await this.verifyDelivery(best, delivery);
+			return delivery;
+		} finally {
+			// 只清理本次 mkdtemp 创建的目录，旧崩溃留下的暂存目录不会被当成交付物。
+			await rm(staging, { recursive: true, force: true });
+		}
 	}
 }

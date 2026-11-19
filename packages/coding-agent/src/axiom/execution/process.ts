@@ -8,6 +8,19 @@ export interface ProcessResult {
 	stopped: "timeout" | "aborted" | "output_limit" | null;
 }
 
+// 每次授权绑定到独立租约，PID 只用于审计。
+export interface WorkerIdentity {
+	pid: number;
+	nonce: string;
+	observedAt: number;
+}
+
+export interface PythonLease {
+	entry: string;
+	nonce: string;
+	authorize(identity: WorkerIdentity): Promise<void>;
+}
+
 // No provider credentials, PYTHONPATH, shell startup files or inherited proxy config.
 export function childEnvironment(executable: string, home: string): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {
@@ -40,26 +53,37 @@ export async function runProcess(
 		signal?: AbortSignal;
 		timeoutMs?: number;
 		maxBytes?: number;
+		lease?: PythonLease;
 	},
 ): Promise<ProcessResult> {
 	options.signal?.throwIfAborted();
 	return new Promise((resolve, reject) => {
-		const child = spawn(executable, args, {
+		const lease = options.lease;
+		const child = spawn(executable, lease ? [lease.entry, lease.nonce, ...args] : args, {
 			cwd: options.cwd,
 			env: childEnvironment(executable, options.home),
 			shell: false,
 			windowsHide: true,
 			detached: process.platform !== "win32",
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: [lease ? "pipe" : "ignore", "pipe", "pipe"],
 		});
 		let stdout = "",
 			stderr = "",
 			bytes = 0;
 		let stopped: ProcessResult["stopped"] = null;
+		let authorizationError: unknown;
+		let authorization = Promise.resolve();
+		let handshake = "";
+		let handshook = false;
 		const limit = options.maxBytes ?? 64 * 1024;
 		const stop = (reason: NonNullable<ProcessResult["stopped"]>) => {
 			if (stopped) return;
 			stopped = reason;
+			// 受管 Python 观察写端关闭，由自己的 Job 或进程组处理终止。
+			if (lease) {
+				child.stdin?.destroy();
+				return;
+			}
 			if (!child.pid) return;
 			if (process.platform === "win32") {
 				const killer = spawn(
@@ -86,8 +110,41 @@ export async function runProcess(
 			bytes += data.length;
 			if (bytes > limit) stop("output_limit");
 		};
-		child.stdout.on("data", (data: Buffer) => capture(data, "stdout"));
-		child.stderr.on("data", (data: Buffer) => capture(data, "stderr"));
+		child.stdin?.on("error", (error: Error) => {
+			if (!stopped) authorizationError = error;
+		});
+		child.stdout?.on("data", (data: Buffer) => {
+			if (!lease || handshook) {
+				capture(data, "stdout");
+				return;
+			}
+			// 工作脚本在授权前不会写 stdout，第一行只用于建立租约。
+			handshake += data.toString("utf8");
+			const end = handshake.indexOf("\n");
+			if (end < 0 && handshake.length < 1024) return;
+			handshook = true;
+			authorization = (async (): Promise<void> => {
+				try {
+					const ready = JSON.parse(handshake.slice(0, end)) as { pid?: unknown; nonce?: unknown };
+					if (
+						end < 0 ||
+						end > 1024 ||
+						ready.nonce !== lease.nonce ||
+						typeof ready.pid !== "number" ||
+						!Number.isSafeInteger(ready.pid) ||
+						ready.pid <= 0
+					)
+						throw new Error("Invalid AXIOM worker lease handshake");
+					if (stopped) return;
+					await lease.authorize({ pid: ready.pid, nonce: lease.nonce, observedAt: Date.now() });
+					if (!stopped) child.stdin?.write("g");
+				} catch (error) {
+					authorizationError = error;
+					child.stdin?.destroy();
+				}
+			})();
+		});
+		child.stderr?.on("data", (data: Buffer) => capture(data, "stderr"));
 		const timer = setTimeout(() => stop("timeout"), options.timeoutMs ?? 60_000);
 		const abort = () => stop("aborted");
 		options.signal?.addEventListener("abort", abort, { once: true });
@@ -102,7 +159,14 @@ export async function runProcess(
 		});
 		child.on("close", (code) => {
 			cleanup();
-			resolve({ code, stdout, stderr, stopped });
+			// 确保授权回调结算后才返回，避免退出与账本提交异步交叉。
+			void authorization.then(
+				() =>
+					authorizationError === undefined
+						? resolve({ code, stdout, stderr, stopped })
+						: reject(authorizationError),
+				reject,
+			);
 		});
 	});
 }

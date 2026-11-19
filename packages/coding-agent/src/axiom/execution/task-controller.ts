@@ -18,6 +18,8 @@ export type StopReason =
 	| "user_cancelled"
 	| "execution_failure"
 	| "operation_unconfirmed"
+	| "clock_untrusted"
+	| "ledger_commit_failure"
 	| "delivery_integrity_failure"
 	| "proposal_limit"
 	| "user_finished";
@@ -44,6 +46,16 @@ export interface TaskSummary {
 	stop_reason?: StopReason;
 	failure?: string;
 	delivery?: Record<string, unknown>;
+	ended_at?: number;
+	compute_reserved_seconds: number;
+	unconfirmed_training_steps: number;
+	remaining: {
+		experiments: number;
+		training_steps: number;
+		compute_seconds: number;
+		tokens: number;
+		wall_seconds: number;
+	};
 	budget: ReturnType<TaskBudget["snapshot"]>;
 	final_test_used: false;
 }
@@ -64,6 +76,7 @@ export interface TaskCheckpoint {
 	spec: TaskSpec;
 	approval: TaskApproval;
 	deadline: number;
+	savedAt?: number;
 	summary: TaskSummary;
 	rows: ExperimentRow[];
 	evaluated: Evaluated[];
@@ -72,6 +85,7 @@ export interface TaskCheckpoint {
 	requests: ModelOperation[];
 	pendingRun?: string;
 	deliveryStarted: boolean;
+	bestPublished?: boolean;
 	delivered: boolean;
 }
 type ModelUsage = {
@@ -126,6 +140,9 @@ export class TaskController {
 	private requests: ModelOperation[] = [];
 	private pendingRun?: string;
 	private deliveryStarted = false;
+	private bestPublished = false;
+	private endedAt?: number;
+	private ledgerFailed = false;
 
 	constructor(
 		root: string,
@@ -186,11 +203,11 @@ export class TaskController {
 			const saved = await ledger.load();
 			if (!saved || saved.taskId !== id) throw new Error("No durable experiment ledger for this task");
 			const spec = validateTaskSpec(saved.spec);
-			const budget = TaskBudget.restore(spec, saved.deadline, saved.summary.budget);
+			const wallNow = Date.now();
+			const budget = TaskBudget.restore(spec, saved.deadline, saved.summary.budget, wallNow);
 			const executor = new CpuTaskExecutor(repo, root, await realpath(python), budget);
 			await executor.initialize(saved.executor, saved.commands.length);
-			for (const command of saved.commands)
-				if (command.status === "completed") await executor.verifyCommand(command);
+			for (const command of saved.commands) if ("recordSha256" in command) await executor.verifyCommand(command);
 			const task = new TaskController(root, spec, budget, executor, onStop);
 			task.attach(ledger, executor, saved.approval, saved.deadline);
 			task.commands = saved.commands;
@@ -198,9 +215,14 @@ export class TaskController {
 			task.rows = saved.rows;
 			task.failure = saved.summary.failure;
 			task.reason = saved.summary.stop_reason;
+			if (task.stopped) {
+				task.endedAt = saved.summary.ended_at ?? saved.savedAt ?? wallNow;
+				budget.freezeWall(saved.summary.budget.wall_seconds);
+			}
 			task.delivery = saved.summary.delivery;
 			task.pendingRun = saved.pendingRun;
 			task.deliveryStarted = saved.deliveryStarted;
+			task.bestPublished = saved.bestPublished ?? false;
 			task.delivered = saved.delivered;
 			for (const run of saved.evaluated) {
 				await executor.verifyEvaluated(run);
@@ -209,17 +231,42 @@ export class TaskController {
 				task.best = chooseBest(task.best, run);
 			}
 			if (task.delivery && task.best) await executor.verifyDelivery(task.best, task.delivery);
-			// 已登记但未结算的操作不重放；即使有临时产物也不能认作成功。
+			// 授权前的意图可证明没有执行。旧版 pending 没有握手证据，始终按未知处理。
+			task.commands = saved.commands.map((op): WorkerOperation => {
+				if (op.status === "intent") {
+					if (op.reservation) budget.releaseUnstarted(op.reservation);
+					return { ...op, status: "not_started" };
+				}
+				if (op.status === "pending" || op.status === "started") return { ...op, status: "unknown" };
+				return op;
+			});
+			// 没有获授权的训练时可重新执行只读审查；有训练凭证但还没有完整结果时暂停。
+			if (
+				task.pendingRun &&
+				!task.commands.some(
+					(op) =>
+						op.runId === task.pendingRun &&
+						(op.status === "unknown" || (op.script !== "review_candidate.py" && op.status !== "not_started")),
+				)
+			) {
+				const row = task.rows.find((entry) => entry.id === task.pendingRun);
+				if (row) row.error = "Interrupted before training authorization";
+				task.pendingRun = undefined;
+			}
 			const interrupted =
-				task.pendingRun || task.commands.some((op) => op.status === "pending") || budget.pendingUsage;
-			if (budget.pendingUsage) task.markUsageUnknown();
-			if (task.deliveryStarted && !task.delivered) {
-				task.reason = "operation_unconfirmed";
-				task.failure = "Previous delivery was interrupted; existing outputs need reconciliation";
-				task.delivered = true;
-			} else if (interrupted) {
-				task.reason = "operation_unconfirmed";
+				task.pendingRun || task.commands.some((op) => op.status === "unknown") || budget.pendingUsage;
+			task.markUsageUnknownInMemory();
+			if (
+				interrupted &&
+				(!task.stopped || task.reason === "execution_failure" || task.reason === "ledger_commit_failure")
+			) {
+				if (!task.stopped) task.requestStop("operation_unconfirmed", "restore");
+				else task.reason = "operation_unconfirmed";
 				task.failure = "An external operation was not confirmed; its reservation was retained";
+			}
+			if (!task.stopped && saved.savedAt !== undefined && wallNow < saved.savedAt) {
+				task.requestStop("clock_untrusted", "restore");
+				task.failure = "System wall clock is behind the last saved checkpoint";
 			}
 			try {
 				task.checkStopConditions();
@@ -252,6 +299,11 @@ export class TaskController {
 		this.persistence = { ledger, executor, approval, deadline };
 		executor.recordCommand = async (operation): Promise<void> => {
 			this.commands[operation.id - 1] = operation;
+			await this.commitLedger();
+		};
+		// 目录可见不代表交付完成，保留中间进度供中断后的完整性核验。
+		executor.recordPublishedBest = async (): Promise<void> => {
+			this.bestPublished = true;
 			await this.commitLedger();
 		};
 	}
@@ -315,7 +367,16 @@ export class TaskController {
 		});
 	}
 
-	markUsageUnknown(): void {
+	// 与取消、模型结算共用队列，避免迟到 usage 重复记账或覆盖未知预留。
+	markUsageUnknown(): Promise<void> {
+		return this.enqueue(async () => {
+			if (!this.budget.pendingUsage) return;
+			this.markUsageUnknownInMemory();
+			await this.commitLedger();
+		});
+	}
+
+	private markUsageUnknownInMemory(): void {
 		if (!this.budget.pendingUsage) return;
 		this.budget.settleTokens(undefined);
 		const op = this.requests.at(-1);
@@ -331,31 +392,35 @@ export class TaskController {
 
 	// Native Pi usage is the accounting input; tool counts and admission estimates are never actual tokens.
 	async recordUsage(evidence: ModelUsage): Promise<void> {
-		const admission = this.budget.snapshot().tokens_admission_estimate;
-		this.budget.settleTokens(
-			evidence.usage.totalTokens,
-			evidence.stop_reason === "error" || evidence.stop_reason === "aborted" ? "partial" : "final",
-		);
-		const op = this.requests.at(-1);
-		if (op?.status === "pending")
-			this.requests[this.requests.length - 1] = {
-				...op,
-				evidence,
-				status: this.budget.uncertain ? "unknown" : "completed",
-			};
-		this.event("native_pi_usage", {
-			source: "Pi message_end",
-			request: this.budget.requests,
-			admission_estimate: admission,
-			...evidence,
-			usage_uncertain: this.budget.uncertain,
+		await this.enqueue(async () => {
+			if (!this.budget.pendingUsage || this.ledgerFailed) return;
+			const admission = this.budget.snapshot().tokens_admission_estimate;
+			this.budget.settleTokens(
+				evidence.usage.totalTokens,
+				evidence.stop_reason === "error" || evidence.stop_reason === "aborted" ? "partial" : "final",
+			);
+			const op = this.requests.at(-1);
+			if (op?.status === "pending")
+				this.requests[this.requests.length - 1] = {
+					...op,
+					evidence,
+					status: this.budget.uncertain ? "unknown" : "completed",
+				};
+			this.event("native_pi_usage", {
+				source: "Pi message_end",
+				request: this.budget.requests,
+				admission_estimate: admission,
+				...evidence,
+				usage_uncertain: this.budget.uncertain,
+			});
+			try {
+				this.budget.check();
+			} catch (error) {
+				this.requestStop(error instanceof BudgetStop ? error.reason : "execution_failure");
+			}
+			if (this.stopped) await this.finalize();
+			else await this.persist();
 		});
-		try {
-			this.budget.check();
-		} catch (error) {
-			this.requestStop(error instanceof BudgetStop ? error.reason : "execution_failure");
-		}
-		await this.enqueue(() => (this.stopped ? this.finalize() : this.persist()));
 	}
 
 	invoke(name: "inspect" | "baseline" | "candidate" | "finish", input: Record<string, unknown>, signal?: AbortSignal) {
@@ -389,7 +454,8 @@ export class TaskController {
 				this.checkStopConditions();
 			} catch (error) {
 				// 已退出并已结算的失败保留终态；只给缺失完成凭证的进程保留待核对意图。
-				if (!this.commands.some((op) => op.status === "pending")) this.pendingRun = undefined;
+				if (!this.ledgerFailed && !this.commands.some((op) => op.status === "intent" || op.status === "started"))
+					this.pendingRun = undefined;
 				this.failure = String(error);
 				this.requestStop(
 					error instanceof BudgetStop ? error.reason : signal?.aborted ? "user_cancelled" : "execution_failure",
@@ -472,6 +538,8 @@ export class TaskController {
 	private requestStop(reason: StopReason, origin: "active" | "restore" = "active"): void {
 		if (this.stopped) return;
 		this.reason = reason;
+		this.endedAt = Date.now();
+		this.budget.freezeWall();
 		clearTimeout(this.timer);
 		this.cancellation.abort(new Error(reason));
 		if (origin === "active") this.onStop();
@@ -479,16 +547,27 @@ export class TaskController {
 
 	private summary(): TaskSummary {
 		const reason = this.reason;
+		const budget = this.budget.snapshot();
+		// 实际耗时和未知操作的超时预留分列；暂停或终态没有可用额度。
+		const inflight = this.commands.filter(
+			(op) =>
+				op.status === "intent" || op.status === "started" || op.status === "pending" || op.status === "unknown",
+		);
+		const reservedCompute = inflight.reduce((sum, op) => sum + op.timeoutMs / 1000, 0);
+		const limits = this.spec.budget;
+		const remaining = (value: number): number => (this.stopped ? 0 : Math.max(0, value));
 		return {
 			status: !reason
 				? "running"
 				: reason === "validation_target_reached"
 					? "target_reached"
-					: reason === "operation_unconfirmed"
+					: reason === "operation_unconfirmed" ||
+							reason === "clock_untrusted" ||
+							reason === "token_usage_uncertain"
 						? "needs_reconciliation"
 						: reason === "user_cancelled"
 							? "cancelled"
-							: reason.includes("budget") || reason === "token_usage_uncertain"
+							: reason.includes("budget")
 								? "budget_exhausted"
 								: reason.includes("failure")
 									? "failed"
@@ -496,7 +575,19 @@ export class TaskController {
 			stop_reason: reason,
 			failure: this.failure,
 			delivery: this.delivery,
-			budget: this.budget.snapshot(),
+			ended_at: this.endedAt,
+			budget,
+			compute_reserved_seconds: reservedCompute,
+			unconfirmed_training_steps: inflight.reduce((sum, op) => sum + (op.reservation?.steps ?? 0), 0),
+			remaining: {
+				experiments: remaining(limits.max_experiments - budget.experiments),
+				training_steps: remaining(limits.training_steps - budget.training_steps_reserved),
+				compute_seconds: remaining(
+					limits.compute_process_seconds - budget.compute_process_seconds - reservedCompute,
+				),
+				tokens: remaining(limits.max_tokens - budget.tokens_actual - budget.tokens_admission_estimate),
+				wall_seconds: remaining(limits.wall_seconds - budget.wall_seconds),
+			},
 			final_test_used: false,
 		};
 	}
@@ -560,22 +651,32 @@ export class TaskController {
 
 	private async commitLedger(): Promise<void> {
 		if (!this.persistence) return;
+		if (this.ledgerFailed) throw new Error("AXIOM ledger failed; reopen the task to reconcile");
 		const { ledger, executor, approval, deadline } = this.persistence;
-		await ledger.save({
-			taskId: basename(this.root),
-			spec: this.spec,
-			approval,
-			deadline,
-			summary: this.summary(),
-			rows: this.rows,
-			evaluated: [...this.cache.values()],
-			executor: executor.checkpoint(),
-			commands: this.commands,
-			requests: this.requests,
-			pendingRun: this.pendingRun,
-			deliveryStarted: this.deliveryStarted,
-			delivered: this.delivered,
-		});
+		try {
+			await ledger.save({
+				taskId: basename(this.root),
+				spec: this.spec,
+				approval,
+				deadline,
+				savedAt: Date.now(),
+				summary: this.summary(),
+				rows: this.rows,
+				evaluated: [...this.cache.values()],
+				executor: executor.checkpoint(),
+				commands: this.commands,
+				requests: this.requests,
+				pendingRun: this.pendingRun,
+				deliveryStarted: this.deliveryStarted,
+				bestPublished: this.bestPublished,
+				delivered: this.delivered,
+			});
+		} catch (error) {
+			// 原提交可能已落盘。该所有者不再写入或执行外部操作，由下一次打开对账。
+			this.ledgerFailed = true;
+			this.requestStop("ledger_commit_failure");
+			throw error;
+		}
 	}
 
 	private event(type: string, detail: unknown): void {

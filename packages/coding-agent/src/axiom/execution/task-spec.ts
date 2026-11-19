@@ -1,28 +1,9 @@
 // Migrated Tiny Task specification and immutable execution policy from local AXIOM WP-04.
 import { createHash } from "node:crypto";
+import { type Static, Type } from "typebox";
+import { Check } from "typebox/value";
+import type { ExperimentTaskSpec } from "./experiment-domain.ts";
 
-export interface TaskSpec {
-	version: 1;
-	task: "tiny-xor-v1";
-	goal: string;
-	target_accuracy: number | null;
-	rules: {
-		pretrained_weights: false;
-		extra_data: false;
-		network: false;
-		editable: "model.py";
-		evaluation: "validation";
-	};
-	budget: {
-		max_experiments: number;
-		wall_seconds: number;
-		max_tokens: number;
-		compute_process_seconds: number;
-		training_steps: number;
-		cpu_threads: 1;
-		device: "cpu";
-	};
-}
 export const DEFAULT_BUDGET = {
 	max_experiments: 2,
 	wall_seconds: 600,
@@ -39,59 +20,82 @@ export const TASK_RULES = {
 	editable: "model.py" as const,
 	evaluation: "validation" as const,
 };
-export const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+export const sha256 = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
 
-function exact(value: unknown, keys: string[]): asserts value is Record<string, unknown> {
-	if (
-		!value ||
-		typeof value !== "object" ||
-		Array.isArray(value) ||
-		Object.keys(value).sort().join() !== [...keys].sort().join()
-	)
-		throw new Error(`Expected exact fields: ${keys.join(", ")}`);
-}
+// 审批只允许收窄 Python 可信配置的学习率范围，其他配置保持固定。
+const learningRate = Type.Number({ minimum: 0.0001, maximum: 0.1 });
+const target = Type.Union([Type.Null(), Type.Number({ minimum: 0, maximum: 1 })]);
+const common = {
+	task: Type.Literal("tiny-xor-v1"),
+	goal: Type.String({ minLength: 1, maxLength: 4000, pattern: "\\S" }),
+	rules: Type.Object(
+		{
+			pretrained_weights: Type.Literal(false),
+			extra_data: Type.Literal(false),
+			network: Type.Literal(false),
+			editable: Type.Literal("model.py"),
+			evaluation: Type.Literal("validation"),
+		},
+		{ additionalProperties: false },
+	),
+	budget: Type.Object(
+		{
+			max_experiments: Type.Integer({ minimum: 1, maximum: 3 }),
+			wall_seconds: Type.Integer({ minimum: 10, maximum: 1800 }),
+			max_tokens: Type.Integer({ minimum: 1, maximum: 500_000 }),
+			compute_process_seconds: Type.Integer({ minimum: 1, maximum: 1200 }),
+			training_steps: Type.Integer({ minimum: 1, maximum: 1000 }),
+			cpu_threads: Type.Literal(1),
+			device: Type.Literal("cpu"),
+		},
+		{ additionalProperties: false },
+	),
+};
+const legacy = Type.Object(
+	{ version: Type.Literal(1), ...common, target_accuracy: target },
+	{ additionalProperties: false },
+);
+const parameterRanges = Type.Object(
+	{
+		learning_rate: Type.Object({ min: learningRate, max: learningRate }, { additionalProperties: false }),
+	},
+	{ additionalProperties: false },
+);
+const current = Type.Object(
+	{
+		version: Type.Literal(2),
+		...common,
+		objective: Type.Object(
+			{
+				metric: Type.Literal("accuracy"),
+				direction: Type.Literal("maximize"),
+				target,
+			},
+			{ additionalProperties: false },
+		),
+		parameters: Type.Optional(parameterRanges),
+		max_revisions: Type.Integer({ minimum: 0, maximum: 3 }),
+	},
+	{ additionalProperties: false },
+);
+
+export type TaskSpec = ExperimentTaskSpec & (Static<typeof legacy> | Static<typeof current>);
+export const parameterProposalSchema = Type.Object(
+	{ learning_rate: Type.Optional(learningRate) },
+	{ additionalProperties: false },
+);
+
 export function validateTaskSpec(value: unknown): TaskSpec {
-	exact(value, ["version", "task", "goal", "target_accuracy", "rules", "budget"]);
-	if (
-		value.version !== 1 ||
-		value.task !== "tiny-xor-v1" ||
-		typeof value.goal !== "string" ||
-		!value.goal.trim() ||
-		value.goal.length > 4000
-	)
-		throw new Error("Only the trusted Tiny Task adapter is available; invalid goal/task");
-	if (
-		value.target_accuracy !== null &&
-		(typeof value.target_accuracy !== "number" ||
-			!Number.isFinite(value.target_accuracy) ||
-			value.target_accuracy < 0 ||
-			value.target_accuracy > 1)
-	)
-		throw new Error("target_accuracy must be null or [0,1]");
-	exact(value.rules, Object.keys(TASK_RULES));
-	for (const [key, expected] of Object.entries(TASK_RULES))
-		if (value.rules[key] !== expected) throw new Error(`Unsupported rule: ${key}; cannot relax trusted policy`);
-	exact(value.budget, Object.keys(DEFAULT_BUDGET));
-	const ranges: Record<string, [number, number]> = {
-		max_experiments: [1, 3],
-		wall_seconds: [10, 1800],
-		max_tokens: [1, 500_000],
-		compute_process_seconds: [1, 1200],
-		training_steps: [1, 1000],
-	};
-	for (const [key, [min, max]] of Object.entries(ranges)) {
-		const n = value.budget[key];
-		if (typeof n !== "number" || !Number.isSafeInteger(n) || n < min || n > max)
-			throw new Error(`Invalid budget ${key}: integer [${min},${max}] required`);
-	}
-	if (value.budget.cpu_threads !== 1 || value.budget.device !== "cpu")
-		throw new Error("Only one-thread CPU execution is supported");
-	// Exact-field validation above establishes this interface; indexed records do not narrow to it.
-	return structuredClone(value) as unknown as TaskSpec;
+	if (Check(legacy, value)) return structuredClone(value);
+	if (!Check(current, value))
+		throw new Error("Invalid Tiny TaskSpec: expected exact fields and bounded values; cannot relax trusted policy");
+	const range = value.parameters?.learning_rate;
+	if (range && range.min > range.max) throw new Error("Invalid approved learning_rate range");
+	return structuredClone(value);
 }
 
 export const REVIEW_NOTES = [
-	"Only trusted examples/tiny-ml-task is supported, not arbitrary current repositories. Config is fixed/read-only.",
+	"Only trusted examples/tiny-ml-task is supported. TaskSpec v2 can approve learning_rate within an explicit range; all other config remains fixed.",
 	"max_experiments counts candidate attempts, including failures. Baseline is separate and always charged to wall/compute/training-step budgets.",
 	"Each candidate reserves 82 training steps (2 Smoke + 80 full); baseline reserves 80. No automatic training retry.",
 	"compute_process_seconds sums child-process elapsed time including Python startup/evaluation; conservative compute envelope, NOT measured CPU-seconds or GPU resources. CPU device and one Torch/BLAS thread are enforced.",

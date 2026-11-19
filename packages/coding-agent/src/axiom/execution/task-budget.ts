@@ -1,5 +1,5 @@
 // Accounts for Tiny Task execution and native Pi usage; admission estimates are not billing guarantees.
-import type { TaskSpec } from "./task-spec.ts";
+import type { ExperimentTaskSpec } from "./experiment-domain.ts";
 
 export type BudgetReason =
 	| "wall_budget_exhausted"
@@ -18,7 +18,7 @@ export class BudgetStop extends Error {
 }
 
 export class TaskBudget {
-	readonly spec: TaskSpec;
+	readonly spec: ExperimentTaskSpec;
 	readonly started: number;
 	private readonly now: () => number;
 	experiments = 0;
@@ -29,14 +29,14 @@ export class TaskBudget {
 	uncertain = false;
 	private held = 0;
 	private frozenWall?: number;
-	constructor(spec: TaskSpec, now: () => number = () => performance.now(), started = now()) {
+	constructor(spec: ExperimentTaskSpec, now: () => number = () => performance.now(), started = now()) {
 		this.spec = spec;
 		this.now = now;
 		this.started = started;
 	}
 	// 将原截止时间和上次观测的剩余额度同时纳入恢复，系统时钟回拨也不会返还预算。
 	static restore(
-		spec: TaskSpec,
+		spec: ExperimentTaskSpec,
 		deadline: number,
 		saved: ReturnType<TaskBudget["snapshot"]>,
 		wallNow = Date.now(),

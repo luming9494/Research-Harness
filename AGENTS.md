@@ -57,6 +57,13 @@ Binding for Chord v2 (`packages/chord/src/`) and its tests, when writing and whe
 - For ad-hoc scripts, `write` them to a temp file (e.g. `/tmp`), run, edit if needed, remove when done. Don't embed multi-line scripts in `bash` commands.
 - Never commit unless the user asks.
 
+## AXIOM 模型 API 使用规范
+
+- AXIOM 自 WP-06.1 起获得付费模型 API 的长期开发授权。开发、调试、集成、真实 Agent 验收和 Benchmark 可按实际需要调用，无须逐次确认。
+- 确定性回归优先使用 faux provider。涉及 Agent 自主决策、真实工具调用闭环、上下文工程或自进化主张时，安排有必要的真实模型验收。
+- 在现有预算内调用，避免无意义重复请求、无限重试及无预算调用。预算约束和 TaskSpec 审批继续生效。
+- 记录实际模型、请求次数、Token、可获取的费用及实验结果，明确区分模拟和真实验收。凭据与私有内容不得进入日志或 Git。
+
 ## Dependency and Install Security
 
 - Treat npm dep and lockfile changes as reviewed code. Direct registry deps, including internal workspace deps, stay pinned to exact versions.

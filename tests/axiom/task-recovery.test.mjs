@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { cp, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -158,6 +158,60 @@ test("DUR-053-02 durable intent without worker authorization permits safe baseli
   assert.equal(after.budget.training_steps_reserved, 80);
   assert.equal(after.delivery.best_id, "baseline");
   console.log(`DUR-053-02 ${ready.workspace}: 80 → 0 → 80; single authorized training`);
+});
+
+test("DUR-061-01 committed launch permission without a sent permit remains unknown", { timeout: 45_000 }, async t => {
+  // SQLite 已提交 started，回调尚未返回，父进程还没写入授权字节。
+  const { child, exited, taskId, ready } = await start(t, "hold-started");
+  assert.equal(child.kill("SIGKILL"), true);
+  await exited;
+  const { before, commands } = await invoke("probe", taskId);
+  assert.equal(before.status, "needs_reconciliation");
+  assert.equal(before.unconfirmed_training_steps, 80);
+  assert.equal(commands.at(-1).status, "unknown");
+  assert.ok(commands.at(-1).identity.nonce);
+  await assert.rejects(readFile(join(ready.workspace, "runs", "baseline", "checkpoint.pt")), { code: "ENOENT" });
+  assert.doesNotMatch(await readFile(join(ready.workspace, "events.jsonl"), "utf8"), /"script":"experiment.py"/);
+  await assert.rejects(invoke("baseline-only", taskId), /Task stopped/);
+});
+
+test("EXP-061-01 real learning-rate contrast survives restart and independently verifies both runs", { timeout: 210_000 }, async t => {
+  const { child, exited, taskId, ready } = await start(t, "hp-start");
+  assert.equal(ready.budget.experiments, 1);
+  assert.equal(child.kill("SIGKILL"), true);
+  await exited;
+  const { before, after, commands } = await invoke("hp-resume", taskId);
+  assert.equal(before.budget.training_steps_reserved, 162);
+  assert.equal(after.budget.training_steps_reserved, 244);
+  assert.equal(after.budget.experiments, 2);
+  assert.equal(after.revisions_used, 1);
+  assert.equal(after.stop_reason, "experiment_budget_exhausted");
+  const [a, invalid, duplicate, b] = after.experiments;
+  assert.equal(invalid.failure_category, "invalid_candidate");
+  assert.equal(duplicate.status, "cache_hit");
+  assert.equal(duplicate.reused_from, a.id);
+  assert.notEqual(a.fingerprint, b.fingerprint);
+  assert.deepEqual(commands.filter(op => op.reservation).map(op => op.runId), ["baseline", a.id, b.id]);
+  assert.equal(commands.some(op => op.runId === invalid.id), false);
+  const python = process.env.AXIOM_PYTHON || resolve(".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+  const results = [];
+  for (const [row, learning_rate] of [[a, 0.01], [b, 0.08]]) {
+    const config = JSON.parse(await readFile(join(row.run, "candidate", "config.json"), "utf8"));
+    assert.deepEqual(config, { ...JSON.parse(after.config), learning_rate });
+    const { stdout } = await exec(python, [resolve("examples/tiny-ml-eval/validate_only.py"), "--run", row.run], { timeout: 60_000 });
+    // 独立重载的耗时随进程变化，指标、数据访问和所有证据哈希必须完全一致。
+    const { wall_seconds: replayTime, ...verified } = JSON.parse(stdout);
+    const { wall_seconds: originalTime, ...recorded } = row.validation;
+    assert.ok(Number.isFinite(replayTime) && replayTime >= 0);
+    assert.ok(Number.isFinite(originalTime) && originalTime >= 0);
+    assert.deepEqual(verified, recorded);
+    assert.equal(hash(await readFile(join(row.run, "checkpoint.pt"))), verified.checkpoint_sha256);
+    results.push({ learning_rate, accuracy: verified.accuracy, loss: verified.loss, sha256: verified.checkpoint_sha256 });
+  }
+  const winner = a.validation.accuracy >= b.validation.accuracy ? a : b;
+  assert.equal(after.delivery.best_id, winner.id);
+  assert.equal(after.delivery.checkpoint_sha256, winner.validation.checkpoint_sha256);
+  console.log(`EXP-061-01 ${ready.workspace}: ${JSON.stringify(results)}; winner=${winner.id}`);
 });
 
 test("DUR-053-04 offline deadline and wall clock rollback never return budget", { timeout: 45_000 }, async t => {

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { TaskBudget } from "../../packages/coding-agent/dist/axiom/execution/task-budget.js";
 import { TaskController, chooseBest } from "../../packages/coding-agent/dist/axiom/execution/task-controller.js";
+import { tinyEvaluation } from "../../packages/coding-agent/dist/axiom/execution/task-executor.js";
 import { DEFAULT_BUDGET, TASK_RULES, validateTaskSpec } from "../../packages/coding-agent/dist/axiom/execution/task-spec.js";
 
 const spec = () => validateTaskSpec({ version: 1, task: "tiny-xor-v1", goal: "Offline test fixture", target_accuracy: null, rules: TASK_RULES, budget: DEFAULT_BUDGET });
@@ -20,10 +21,12 @@ async function create(t, options = {}) {
   let deliveries = 0;
   const executor = {
     original: "baseline", config: '{"epochs":80}',
+    evaluation: tinyEvaluation(input.target_accuracy), reportNotes: [],
+    trainingSteps: role => role === "baseline" ? 80 : 82,
+    async verifyEvaluated() {},
     async prepare(id, content, rationale) { return { id, content, rationale, fingerprint: content.trim() }; },
     async run(prepared, role, signal) {
       signal.throwIfAborted();
-      budget.launch(role, role === "baseline" ? 80 : 82);
       launched.push(prepared.id);
       if (prepared.content === "fail") throw new Error("Injected worker failure");
       if (prepared.content === "wait") await new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));

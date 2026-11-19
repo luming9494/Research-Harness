@@ -1,5 +1,15 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-06.1 真实模型验收
+
+原生 Pi CLI/RPC 以单候选、162 训练步和 60,000 Token 准入预算运行 `deepseek/deepseek-flash`，供应商自动重试关闭。模型按顺序调用 inspect、baseline、candidate，自行提出 8 单元 ReLU 隐层和审批范围内的 `learning_rate=0.05`。基线准确率 0.5，候选独立 validation 准确率 **0.998046875**，loss **0.004902488552033901**。达到候选上限后交付 `exp-1`，重新加载 `best/` 复验相同指标及权重 SHA-256 `3a2e1066e1780cdfd01afcce2155312def1eaa447fa30999b232d45217d53374`。
+
+Pi 记录 **3 次**模型请求、**5,812 Token**、估计费用 **USD 0.00138156**，费用来源为 Pi 模型目录估算。两项改动同时发生，准确率增益不能单独归因于学习率。实验产物和用量证据分别保存在本地 `private/wp04-9blH21/`、`private/wp061-live-lO490A/usage.json`。固定候选学习率对照、合成第二适配器与原生故障注入分别验收。[WP-06.1 内核及用例](AXIOM_EXPERIMENT_ENGINE.md)
+
+Windows 离线构建、静态检查及全量 ML **89/89** 通过。固定模型的学习率对照单独运行并复验两组指标。Pi Session 回归使用 faux provider，本段真实模型请求独立记录。Linux 运行待验收。
+
+## WP-05 验收索引
+
 本文保留 WP-04 及此前的真实 LLM 验收记录。后续 [WP-05.2 恢复验收](AXIOM_WP05_RUNTIME.md) 用人工固定候选和真实 Python 训练、独立评估验证了 Tiny CPU 任务跨进程恢复。测试 Token 为固定数据，未新增收费 API 调用。
 
 WP-05.3 在同一基线上增加进程生命周期、事务失败、冻结终态、交付中断和产物损坏故障用例。稳定 Case ID、触发方式和验收结果见 [WP-05.3 故障用例记录](AXIOM_WP05_RUNTIME.md#故障用例记录)。

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { BudgetStop } from "../../packages/coding-agent/src/axiom/execution/task-budget.ts";
 import { TaskController } from "../../packages/coding-agent/src/axiom/execution/task-controller.ts";
-import { DEFAULT_BUDGET, TASK_RULES, validateTaskSpec } from "../../packages/coding-agent/src/axiom/execution/task-spec.ts";
+import { DEFAULT_BUDGET, parameterProposalSchema, TASK_RULES, validateTaskSpec } from "../../packages/coding-agent/src/axiom/execution/task-spec.ts";
 import { openExperimentLedger } from "../durable/experiment-ledger.ts";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
@@ -14,7 +14,8 @@ const empty = Type.Object({}, { additionalProperties: false });
 const tools = [
   { name: "inspect", description: "Read immutable Tiny Task rules, fixed model/config, real history best, validation evidence and budget.", parameters: empty },
   { name: "baseline", description: "Train the fixed baseline once and independently evaluate validation. Required before candidates.", parameters: empty },
-  { name: "candidate", description: "Submit one complete model.py and rationale. Host reviews AST, deduplicates, runs Smoke/full training and independent validation synchronously. No polling. Only nn.Linear/Sequential/ReLU/Tanh, literal dimensions, 2 inputs/outputs, <=1024 parameters. No config changes.", parameters: Type.Object({ content: Type.String({ maxLength: 8192 }), rationale: Type.String({ minLength: 1, maxLength: 2000 }) }, { additionalProperties: false }) },
+  // 工具只公开受限学习率字段，任务是否准许以及具体范围以原审批为准。
+  { name: "candidate", description: "Submit one complete model.py and rationale. Only nn.Linear/Sequential/ReLU/Tanh, literal dimensions, 2 inputs/outputs, <=1024 parameters. Optional learning_rate requires explicit TaskSpec v2 approval. Inspect task rules first. Host deduplicates and independently evaluates. No polling.", parameters: Type.Object({ content: Type.String({ maxLength: 8192 }), rationale: Type.String({ minLength: 1, maxLength: 2000 }), parameters: Type.Optional(parameterProposalSchema) }, { additionalProperties: false }) },
   { name: "finish", description: "Stop experiments and deliver the independently validated history best. Never self-report metrics.", parameters: empty },
 ] as const;
 const names = tools.map(tool => `axiom_task_${tool.name}`);
@@ -54,7 +55,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
     }
   });
   pi.on("before_agent_start", event => {
-    if (active) event.systemPromptOptions.sections.axiom_task = "Trusted Tiny Task Optimize: use axiom_task_inspect, then baseline, then propose candidates from independent validation feedback. The host enforces budgets, selects best and stops. Candidate tool waits for CPU work; do not poll. No final-test, arbitrary shell, config edits or reference implementation access.";
+    if (active) event.systemPromptOptions.sections.axiom_task = "Trusted Tiny Task Optimize: inspect, run baseline, then propose candidates from independent validation feedback. Only include learning_rate if the approved TaskSpec lists its range. Revise only if the host returns a failed candidate while the task remains running. No final-test, arbitrary shell, file edits or reference implementation access.";
   });
   pi.on("context_with_system", async (event, ctx) => {
     if (!active || !task) return;
@@ -103,7 +104,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
           async execute(_id, params, signal) {
             if (!active || !task) throw new Error("Start /axiom-task first");
             const result = await task.invoke(tool.name, params as Record<string, unknown>, signal);
-            return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, terminate: task.stopped, isError: result.status === "failed" };
+            return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, terminate: task.stopped, isError: result.status === "failed" || (tool.name === "candidate" && result.failure_category !== undefined) };
           },
         });
         registered = true;

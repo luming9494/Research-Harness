@@ -1,16 +1,25 @@
-// Controls serialized multi-round Tiny experiments independently of Pi conversation/session state.
+// 通用实验内核负责候选去重、预算、账本、终止和交付。
 import { appendFileSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rename, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative } from "node:path";
-import { type BudgetReason, BudgetStop, TaskBudget } from "./task-budget.ts";
 import {
-	CpuTaskExecutor,
-	type Evaluated,
-	type ExecutorCheckpoint,
-	type TaskExecutor,
+	type AdapterCheckpoint,
+	type ArtifactManifest,
+	type Candidate,
+	type DurableExperimentAdapter,
+	type ExperimentAdapter,
+	type ExperimentDomain,
+	ExperimentFailure,
+	type ExperimentRole,
+	type ExperimentTaskSpec,
+	type FailureCategory,
+	objectiveValue,
+	type RunResult,
+	validateProposal,
 	type WorkerOperation,
-} from "./task-executor.ts";
-import { REVIEW_NOTES, type TaskSpec, validateTaskSpec } from "./task-spec.ts";
+} from "./experiment-domain.ts";
+import { type BudgetReason, BudgetStop, TaskBudget } from "./task-budget.ts";
+import { tinyEvaluation, tinyExperimentDomain } from "./task-executor.ts";
 
 export type StopReason =
 	| BudgetReason
@@ -28,11 +37,12 @@ export interface ExperimentRow {
 	status: "evaluated" | "cache_hit" | "failed";
 	rationale: string;
 	fingerprint?: string;
-	validation?: Evaluated["validation"];
+	validation?: RunResult["validation"];
 	run?: string;
 	best_id?: string;
 	reused_from?: string;
 	error?: string;
+	failure_category?: FailureCategory;
 }
 export interface TaskSummary {
 	status:
@@ -45,7 +55,9 @@ export interface TaskSummary {
 		| "needs_reconciliation";
 	stop_reason?: StopReason;
 	failure?: string;
-	delivery?: Record<string, unknown>;
+	delivery?: ArtifactManifest;
+	failure_category?: FailureCategory;
+	revisions_used?: number;
 	ended_at?: number;
 	compute_reserved_seconds: number;
 	unconfirmed_training_steps: number;
@@ -73,14 +85,16 @@ export interface TaskApproval {
 }
 export interface TaskCheckpoint {
 	taskId: string;
-	spec: TaskSpec;
+	spec: ExperimentTaskSpec;
+	domain?: { id: string; version: number };
 	approval: TaskApproval;
 	deadline: number;
 	savedAt?: number;
 	summary: TaskSummary;
 	rows: ExperimentRow[];
-	evaluated: Evaluated[];
-	executor: ExecutorCheckpoint;
+	evaluated: RunResult[];
+	attempted?: string[];
+	executor: AdapterCheckpoint;
 	commands: WorkerOperation[];
 	requests: ModelOperation[];
 	pendingRun?: string;
@@ -99,43 +113,46 @@ type ModelOperation = { id: number; estimate: number } & (
 	| { status: "completed" | "unknown"; evidence?: ModelUsage }
 );
 
-// Migrated selection rule: independent full validation only, strict improvement, ties retain history.
-export function chooseBest(current: Evaluated | undefined, candidate: Evaluated): Evaluated {
-	const result = candidate.validation;
-	// Python evaluator stdout is the evidence trust boundary.
-	if (
-		result.split !== "validation" ||
-		result.level !== "full" ||
-		result.protocol !== "tiny-xor-v1" ||
-		result.samples !== 512 ||
-		!Number.isFinite(result.accuracy) ||
-		result.accuracy < 0 ||
-		result.accuracy > 1 ||
-		!Number.isFinite(result.loss) ||
-		JSON.stringify(result.dataset_access_log) !== '["validation"]'
-	)
-		throw new Error("Best selection requires valid independent validation evidence");
-	return !current || result.accuracy > current.validation.accuracy ? candidate : current;
+// 保留旧的 Tiny 测试和调用入口，通用控制器始终传入任务实际评估协议。
+export function chooseBest<T extends RunResult>(
+	current: T | undefined,
+	candidate: T,
+	protocol: ExperimentAdapter["evaluation"] = tinyEvaluation(null),
+): T {
+	const next = objectiveValue(candidate, protocol);
+	if (!current) return candidate;
+	const previous = objectiveValue(current, protocol);
+	const { direction } = protocol.objectives[0];
+	return (direction === "maximize" ? next > previous : next < previous) ? candidate : current;
 }
 
 export class TaskController {
 	readonly root: string;
-	readonly spec: TaskSpec;
+	readonly spec: ExperimentTaskSpec;
 	readonly budget: TaskBudget;
-	readonly executor: TaskExecutor;
+	readonly executor: ExperimentAdapter;
 	private readonly onStop: () => void;
 	private serial: Promise<unknown> = Promise.resolve();
 	private readonly cancellation = new AbortController();
 	private timer?: ReturnType<typeof setTimeout>;
 	private reason?: StopReason;
 	private failure?: string;
-	private baseline?: Evaluated;
-	private best?: Evaluated;
+	private failureCategory?: FailureCategory;
+	private revisionsUsed = 0;
+	private baseline?: RunResult;
+	private best?: RunResult;
 	private rows: ExperimentRow[] = [];
-	private cache = new Map<string, Evaluated>();
+	private cache = new Map<string, RunResult>();
+	private attempted = new Set<string>();
 	private delivered = false;
-	private delivery?: Record<string, unknown>;
-	private persistence?: { ledger: TaskLedger; executor: CpuTaskExecutor; approval: TaskApproval; deadline: number };
+	private delivery?: ArtifactManifest;
+	private persistence?: {
+		ledger: TaskLedger;
+		executor: DurableExperimentAdapter;
+		approval: TaskApproval;
+		deadline: number;
+		domain: { id: string; version: number };
+	};
 	private commands: WorkerOperation[] = [];
 	private requests: ModelOperation[] = [];
 	private pendingRun?: string;
@@ -146,9 +163,9 @@ export class TaskController {
 
 	constructor(
 		root: string,
-		spec: TaskSpec,
+		spec: ExperimentTaskSpec,
 		budget: TaskBudget,
-		executor: TaskExecutor,
+		executor: ExperimentAdapter,
 		onStop: () => void = () => {},
 	) {
 		this.root = root;
@@ -164,19 +181,21 @@ export class TaskController {
 		input: unknown,
 		onStop: () => void,
 		durable?: { open: OpenTaskLedger; approval: TaskApproval },
+		domain: ExperimentDomain = tinyExperimentDomain,
 	): Promise<TaskController> {
-		const spec = validateTaskSpec(input);
+		const spec = domain.validateSpec(input);
+		if (spec.task !== domain.id) throw new Error("TaskSpec does not match experiment adapter");
 		repo = await realpath(repo);
 		python = await realpath(python);
 		const parent = await TaskController.taskDirectory(repo);
 		const root = await mkdtemp(join(parent, "wp04-"));
 		const budget = new TaskBudget(spec);
-		const executor = new CpuTaskExecutor(repo, root, python, budget);
-		await executor.initialize();
+		const executor = await domain.open({ repo, root, python, budget });
 		const task = new TaskController(root, spec, budget, executor, onStop);
 		const ledger = await durable?.open(root);
 		try {
-			if (ledger && durable) task.attach(ledger, executor, durable.approval, Date.now() + budget.remainingWallMs);
+			if (ledger && durable)
+				task.attach(ledger, executor, durable.approval, Date.now() + budget.remainingWallMs, domain);
 			await task.initialize();
 		} catch (error) {
 			await ledger?.close();
@@ -192,6 +211,7 @@ export class TaskController {
 		id: string,
 		open: OpenTaskLedger,
 		onStop: () => void,
+		domain: ExperimentDomain = tinyExperimentDomain,
 	): Promise<TaskController> {
 		if (!/^wp04-[A-Za-z0-9]{6}$/.test(id)) throw new Error("Invalid AXIOM task ID");
 		repo = await realpath(repo);
@@ -202,18 +222,31 @@ export class TaskController {
 		try {
 			const saved = await ledger.load();
 			if (!saved || saved.taskId !== id) throw new Error("No durable experiment ledger for this task");
-			const spec = validateTaskSpec(saved.spec);
+			const spec = domain.validateSpec(saved.spec);
+			// 无版本标记的历史账本仅允许原适配器按旧权限解释。
+			const compatible = saved.domain
+				? saved.domain.id === domain.id && saved.domain.version === domain.version
+				: domain.acceptsLegacy(spec);
+			if (!compatible || spec.task !== domain.id) throw new Error("Incompatible experiment adapter checkpoint");
 			const wallNow = Date.now();
 			const budget = TaskBudget.restore(spec, saved.deadline, saved.summary.budget, wallNow);
-			const executor = new CpuTaskExecutor(repo, root, await realpath(python), budget);
-			await executor.initialize(saved.executor, saved.commands.length);
+			const executor = await domain.open({
+				repo,
+				root,
+				python: await realpath(python),
+				budget,
+				saved: saved.executor,
+				commandCount: saved.commands.length,
+			});
 			for (const command of saved.commands) if ("recordSha256" in command) await executor.verifyCommand(command);
 			const task = new TaskController(root, spec, budget, executor, onStop);
-			task.attach(ledger, executor, saved.approval, saved.deadline);
+			task.attach(ledger, executor, saved.approval, saved.deadline, domain);
 			task.commands = saved.commands;
 			task.requests = saved.requests;
 			task.rows = saved.rows;
 			task.failure = saved.summary.failure;
+			task.failureCategory = saved.summary.failure_category;
+			task.revisionsUsed = saved.summary.revisions_used ?? 0;
 			task.reason = saved.summary.stop_reason;
 			if (task.stopped) {
 				task.endedAt = saved.summary.ended_at ?? saved.savedAt ?? wallNow;
@@ -228,7 +261,7 @@ export class TaskController {
 				await executor.verifyEvaluated(run);
 				task.cache.set(run.fingerprint, run);
 				if (run.id === "baseline") task.baseline = run;
-				task.best = chooseBest(task.best, run);
+				task.best = chooseBest(task.best, run, executor.evaluation);
 			}
 			if (task.delivery && task.best) await executor.verifyDelivery(task.best, task.delivery);
 			// 授权前的意图可证明没有执行。旧版 pending 没有握手证据，始终按未知处理。
@@ -240,13 +273,22 @@ export class TaskController {
 				if (op.status === "pending" || op.status === "started") return { ...op, status: "unknown" };
 				return op;
 			});
+			// 尝试记录覆盖所有适配器。只有账本证明未启动，且没有同指纹的启动记录时才解除防重。
+			task.attempted = new Set(saved.attempted);
+			const authorized = new Set<string>();
+			for (const op of task.commands)
+				if (op.reservation && op.fingerprint && op.status !== "not_started") authorized.add(op.fingerprint);
+			for (const op of task.commands)
+				if (op.reservation && op.fingerprint && op.status === "not_started" && !authorized.has(op.fingerprint))
+					task.attempted.delete(op.fingerprint);
+			for (const fingerprint of authorized) task.attempted.add(fingerprint);
 			// 没有获授权的训练时可重新执行只读审查；有训练凭证但还没有完整结果时暂停。
 			if (
 				task.pendingRun &&
 				!task.commands.some(
 					(op) =>
 						op.runId === task.pendingRun &&
-						(op.status === "unknown" || (op.script !== "review_candidate.py" && op.status !== "not_started")),
+						(op.status === "unknown" || (!executor.isReadOnly(op) && op.status !== "not_started")),
 				)
 			) {
 				const row = task.rows.find((entry) => entry.id === task.pendingRun);
@@ -263,6 +305,7 @@ export class TaskController {
 				if (!task.stopped) task.requestStop("operation_unconfirmed", "restore");
 				else task.reason = "operation_unconfirmed";
 				task.failure = "An external operation was not confirmed; its reservation was retained";
+				task.failureCategory = "external_unknown";
 			}
 			if (!task.stopped && saved.savedAt !== undefined && wallNow < saved.savedAt) {
 				task.requestStop("clock_untrusted", "restore");
@@ -295,8 +338,14 @@ export class TaskController {
 		return resolved;
 	}
 
-	private attach(ledger: TaskLedger, executor: CpuTaskExecutor, approval: TaskApproval, deadline: number): void {
-		this.persistence = { ledger, executor, approval, deadline };
+	private attach(
+		ledger: TaskLedger,
+		executor: DurableExperimentAdapter,
+		approval: TaskApproval,
+		deadline: number,
+		domain: ExperimentDomain,
+	): void {
+		this.persistence = { ledger, executor, approval, deadline, domain: { id: domain.id, version: domain.version } };
 		executor.recordCommand = async (operation): Promise<void> => {
 			this.commands[operation.id - 1] = operation;
 			await this.commitLedger();
@@ -423,14 +472,21 @@ export class TaskController {
 		});
 	}
 
-	invoke(name: "inspect" | "baseline" | "candidate" | "finish", input: Record<string, unknown>, signal?: AbortSignal) {
+	invoke(
+		name: "inspect" | "baseline" | "candidate" | "finish",
+		input: Record<string, unknown>,
+		signal?: AbortSignal,
+	): Promise<ReturnType<TaskController["snapshot"]>> {
 		return this.enqueue(async () => {
 			if (name === "inspect") return this.snapshot();
 			if (this.stopped) throw new Error(`Task stopped: ${this.reason}; no more experiments`);
-			const keys = name === "candidate" ? ["content", "rationale"] : [];
-			// Tool arguments are a wire boundary, even when called outside Pi's schema wrapper.
+			const keys = name === "candidate" ? ["content", "rationale", "parameters"] : [];
+			// 工具入口不给任意配置、权限或评估协议覆盖的机会。
 			if (Object.keys(input).some((key) => !keys.includes(key)))
-				throw new Error("Permission denied: task rules/config/split cannot be overridden");
+				throw new ExperimentFailure(
+					"permission_violation",
+					"Permission denied: task rules/config/split cannot be overridden",
+				);
 			const combined = signal ? AbortSignal.any([signal, this.cancellation.signal]) : this.cancellation.signal;
 			const cancel = () => this.requestStop("user_cancelled");
 			signal?.addEventListener("abort", cancel, { once: true });
@@ -441,25 +497,12 @@ export class TaskController {
 				else if (name === "baseline") await this.runBaseline(combined);
 				else {
 					if (!this.baseline) throw new Error("Run baseline before proposing candidates");
-					if (
-						typeof input.content !== "string" ||
-						Buffer.byteLength(input.content) > 8192 ||
-						typeof input.rationale !== "string" ||
-						!input.rationale.trim() ||
-						input.rationale.length > 2000
-					)
-						throw new Error("Invalid candidate proposal");
-					await this.runCandidate(input.content, input.rationale, combined);
+					await this.runCandidate(input, combined);
 				}
 				this.checkStopConditions();
 			} catch (error) {
 				// 已退出并已结算的失败保留终态；只给缺失完成凭证的进程保留待核对意图。
-				if (!this.ledgerFailed && !this.commands.some((op) => op.status === "intent" || op.status === "started"))
-					this.pendingRun = undefined;
-				this.failure = String(error);
-				this.requestStop(
-					error instanceof BudgetStop ? error.reason : signal?.aborted ? "user_cancelled" : "execution_failure",
-				);
+				this.handleFailure(error, name, combined);
 			} finally {
 				signal?.removeEventListener("abort", cancel);
 			}
@@ -467,6 +510,59 @@ export class TaskController {
 			else await this.persist();
 			return this.snapshot();
 		});
+	}
+
+	// 仅允许明确审批的候选修订。未知外部操作和账本故障优先于适配器的返回。
+	private handleFailure(error: unknown, action: string, signal: AbortSignal): void {
+		const category = this.classifyFailure(error);
+		if (category !== "ledger_error" && category !== "external_unknown") this.pendingRun = undefined;
+		this.failureCategory = category;
+		this.failure = String(error);
+		if (
+			action === "candidate" &&
+			!signal.aborted &&
+			!this.stopped &&
+			error instanceof ExperimentFailure &&
+			(category === "invalid_candidate" || category === "domain_execution") &&
+			this.revisionsUsed < (this.spec.max_revisions ?? 0) &&
+			this.rows.length < this.spec.budget.max_experiments * 2
+		) {
+			try {
+				this.checkStopConditions();
+				if (!this.stopped) {
+					if (
+						this.budget.trainingSteps + this.executor.trainingSteps("candidate") >
+						this.spec.budget.training_steps
+					)
+						throw new BudgetStop("training_step_budget_exhausted");
+					this.revisionsUsed++;
+					return;
+				}
+			} catch (budgetError) {
+				if (budgetError instanceof BudgetStop) {
+					this.requestStop(budgetError.reason);
+					return;
+				}
+				throw budgetError;
+			}
+		}
+		this.requestStop(
+			category === "external_unknown"
+				? "operation_unconfirmed"
+				: error instanceof BudgetStop
+					? error.reason
+					: signal.aborted
+						? "user_cancelled"
+						: "execution_failure",
+		);
+	}
+
+	private classifyFailure(error: unknown): FailureCategory {
+		if (this.ledgerFailed) return "ledger_error";
+		if (this.commands.some((op) => op.status === "intent" || op.status === "started" || op.status === "unknown"))
+			return "external_unknown";
+		if (error instanceof BudgetStop) return "budget_exhausted";
+		return error instanceof ExperimentFailure ? error.category : "domain_execution";
 	}
 
 	private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -485,31 +581,42 @@ export class TaskController {
 			"Unchanged actual baseline",
 			signal,
 		);
-		const evaluated = await this.executor.run(prepared, "baseline", signal);
-		this.baseline = chooseBest(undefined, evaluated);
+		const evaluated = await this.runPrepared(prepared, "baseline", signal);
+		this.baseline = chooseBest(undefined, evaluated, this.executor.evaluation);
 		this.best = this.baseline;
 		this.cache.set(evaluated.fingerprint, evaluated);
 		this.pendingRun = undefined;
 		this.event("baseline_evaluated", evaluated);
 	}
 
-	private async runCandidate(content: string, rationale: string, signal: AbortSignal): Promise<void> {
+	private async runCandidate(input: Record<string, unknown>, signal: AbortSignal): Promise<void> {
 		if (this.budget.experiments >= this.spec.budget.max_experiments)
 			throw new BudgetStop("experiment_budget_exhausted");
 		if (this.rows.length >= this.spec.budget.max_experiments * 2) {
 			this.requestStop("proposal_limit");
 			return;
 		}
-		const row: ExperimentRow = { id: `exp-${this.rows.length + 1}`, status: "failed", rationale };
+		const row: ExperimentRow = { id: `exp-${this.rows.length + 1}`, status: "failed", rationale: "" };
 		this.rows.push(row);
 		this.pendingRun = row.id;
 		try {
+			const { content, rationale, parameters } = validateProposal(input);
+			row.rationale = rationale;
 			await this.commitLedger();
-			const prepared = await this.executor.prepare(row.id, content, rationale, signal);
+			const prepared = await this.executor.prepare(row.id, content, rationale, signal, parameters);
 			row.fingerprint = prepared.fingerprint;
 			const existing = this.cache.get(prepared.fingerprint);
-			const result = existing ?? (await this.executor.run(prepared, "candidate", signal));
-			this.best = chooseBest(this.best, result);
+			if (existing) {
+				try {
+					await this.executor.verifyEvaluated(existing);
+				} catch (error) {
+					throw new ExperimentFailure("evidence_integrity", String(error));
+				}
+			}
+			if (!existing && this.attempted.has(prepared.fingerprint))
+				throw new ExperimentFailure("invalid_candidate", "Previously attempted experiment cannot be retrained");
+			const result = existing ?? (await this.runPrepared(prepared, "candidate", signal));
+			this.best = chooseBest(this.best, result, this.executor.evaluation);
 			row.status = existing ? "cache_hit" : "evaluated";
 			row.reused_from = existing?.id;
 			row.validation = result.validation;
@@ -517,21 +624,38 @@ export class TaskController {
 			row.best_id = this.best.id;
 			this.cache.set(result.fingerprint, result);
 			this.pendingRun = undefined;
+			this.failure = undefined;
+			this.failureCategory = undefined;
 			this.event(row.status, row);
 		} catch (error) {
 			row.error = String(error);
+			row.failure_category = this.classifyFailure(error);
 			row.best_id = this.best?.id;
 			this.event("candidate_failed", row);
 			throw error;
 		}
 	}
 
+	// 适配器提供成本，内核准入并把同一份预留交给适配器提交执行意图。
+	private runPrepared(candidate: Candidate, role: ExperimentRole, signal: AbortSignal): Promise<RunResult> {
+		const steps = this.executor.trainingSteps(role);
+		this.budget.launch(role, steps);
+		this.attempted.add(candidate.fingerprint);
+		return this.executor.run(candidate, { role, steps }, signal);
+	}
+
 	private checkStopConditions(): void {
 		if (this.stopped) return;
-		if (this.best && this.spec.target_accuracy !== null && this.best.validation.accuracy >= this.spec.target_accuracy)
-			this.requestStop("validation_target_reached");
-		else if (this.budget.experiments >= this.spec.budget.max_experiments)
-			this.requestStop("experiment_budget_exhausted");
+		const protocol = this.executor.evaluation;
+		const { target, direction } = protocol.objectives[0];
+		if (this.best && target !== null) {
+			const value = objectiveValue(this.best, protocol);
+			if (direction === "maximize" ? value >= target : value <= target) {
+				this.requestStop("validation_target_reached");
+				return;
+			}
+		}
+		if (this.budget.experiments >= this.spec.budget.max_experiments) this.requestStop("experiment_budget_exhausted");
 		else this.budget.check();
 	}
 
@@ -574,6 +698,8 @@ export class TaskController {
 									: "completed",
 			stop_reason: reason,
 			failure: this.failure,
+			failure_category: this.failureCategory,
+			revisions_used: this.spec.max_revisions === undefined ? undefined : this.revisionsUsed,
 			delivery: this.delivery,
 			ended_at: this.endedAt,
 			budget,
@@ -600,9 +726,14 @@ export class TaskController {
 				await this.commitLedger();
 				try {
 					this.delivery = await this.executor.deliver(this.best);
+					if (this.delivery.best_id !== this.best.id) {
+						this.delivery = undefined;
+						throw new ExperimentFailure("evidence_integrity", "Delivery manifest references a different run");
+					}
 				} catch (error) {
 					this.reason = "delivery_integrity_failure";
 					this.failure = String(error);
+					this.failureCategory = this.ledgerFailed ? "ledger_error" : "evidence_integrity";
 				}
 			}
 			this.delivered = true;
@@ -622,29 +753,28 @@ export class TaskController {
 			await rename(join(this.root, `${name}.tmp`), join(this.root, name));
 		}
 		if (!this.stopped) return;
+		const metric = this.executor.evaluation.objectives[0].metric;
 		const rows = this.rows.map(
 			(row) =>
-				`| ${row.id} | ${row.status} | ${row.validation?.accuracy ?? "unknown"} | ${row.best_id ?? "none"} | ${row.reused_from ?? "none"} |`,
+				`| ${row.id} | ${row.status} | ${row.validation?.[metric] ?? "unknown"} | ${row.best_id ?? "none"} | ${row.reused_from ?? "none"} |`,
 		);
 		await writeFile(
 			join(this.root, "report.md"),
 			[
-				"# AXIOM Tiny Task delivery",
+				"# AXIOM experiment delivery",
 				`Status: ${snapshot.status}; reason: ${snapshot.stop_reason}`,
-				"Validation only, one seed; no final-test or statistical significance claim.",
 				[
-					"| ID | Status | Validation accuracy | History best | Reused from |",
+					`| ID | Status | ${metric} | History best | Reused from |`,
 					"| --- | --- | --- | --- | --- |",
-					`| baseline | ${this.baseline ? "evaluated" : "not_completed"} | ${this.baseline?.validation.accuracy ?? "unknown"} | ${this.baseline ? "baseline" : "none"} | none |`,
+					`| baseline | ${this.baseline ? "evaluated" : "not_completed"} | ${this.baseline?.validation[metric] ?? "unknown"} | ${this.baseline ? "baseline" : "none"} | none |`,
 					...rows,
 				].join("\n"),
 				"## Delivery and budget",
 				"```json",
 				JSON.stringify(this.summary(), null, 2),
 				"```",
-				"Reload: python examples/tiny-ml-eval/validate_only.py --run <workspace>/best",
 				"## Limits",
-				...REVIEW_NOTES.map((note) => `- ${note}`),
+				...this.executor.reportNotes.map((note) => `- ${note}`),
 			].join("\n\n"),
 		);
 	}
@@ -652,17 +782,19 @@ export class TaskController {
 	private async commitLedger(): Promise<void> {
 		if (!this.persistence) return;
 		if (this.ledgerFailed) throw new Error("AXIOM ledger failed; reopen the task to reconcile");
-		const { ledger, executor, approval, deadline } = this.persistence;
+		const { ledger, executor, approval, deadline, domain } = this.persistence;
 		try {
 			await ledger.save({
 				taskId: basename(this.root),
 				spec: this.spec,
+				domain,
 				approval,
 				deadline,
 				savedAt: Date.now(),
 				summary: this.summary(),
 				rows: this.rows,
 				evaluated: [...this.cache.values()],
+				attempted: [...this.attempted],
 				executor: executor.checkpoint(),
 				commands: this.commands,
 				requests: this.requests,

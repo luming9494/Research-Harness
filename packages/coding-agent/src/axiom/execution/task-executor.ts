@@ -4,59 +4,87 @@ import { appendFileSync } from "node:fs";
 import { copyFile, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTwoFilesPatch } from "diff";
+import { type Static, Type } from "typebox";
+import { Check } from "typebox/value";
+import {
+	type AdapterCheckpoint,
+	type ArtifactManifest,
+	type Candidate,
+	type DurableExperimentAdapter,
+	type EvaluationProtocol,
+	type ExperimentDomain,
+	ExperimentFailure,
+	type ExperimentRole,
+	type RunResult,
+	type TrainingReservation,
+	type WorkerOperation,
+} from "./experiment-domain.ts";
 import { type ProcessResult, runProcess, type WorkerIdentity } from "./process.ts";
-import type { ValidationResult } from "./smoke-workspace.ts";
 import { BudgetStop, type TaskBudget } from "./task-budget.ts";
-import { sha256 } from "./task-spec.ts";
+import { parameterProposalSchema, REVIEW_NOTES, sha256, type TaskSpec, validateTaskSpec } from "./task-spec.ts";
 
-export interface Prepared {
-	id: string;
-	fingerprint: string;
-	content: string;
-	rationale: string;
-}
-export interface Evaluated {
-	validation: ValidationResult;
-	run: string;
-	model: string;
-	fingerprint: string;
-	id: string;
-	historySha256: string;
-}
-// 每次 Python 调用的意图、预留上限和完成记录由实验账本一起保存。
-export type WorkerOperation = {
-	id: number;
-	runId: string;
-	fingerprint?: string;
-	script: string;
-	timeoutMs: number;
-	reservation?: { role: "baseline" | "candidate"; steps: number };
-} & (
-	| { status: "pending" | "unknown"; identity?: WorkerIdentity }
-	| { status: "intent" | "not_started"; nonce: string }
-	| { status: "started"; identity: WorkerIdentity }
-	| {
-			status: "completed" | "failed";
-			identity?: WorkerIdentity;
-			elapsedMs: number;
-			exitCode: number | null;
-			stopped: Awaited<ReturnType<typeof runProcess>>["stopped"];
-			recordSha256: string;
-	  }
+const hashSchema = Type.String({ pattern: "^[0-9a-f]{64}$" });
+const validationSchema = Type.Object({
+	protocol: Type.Literal("tiny-xor-v1"),
+	split: Type.Literal("validation"),
+	level: Type.Literal("full"),
+	samples: Type.Literal(512),
+	accuracy: Type.Number({ minimum: 0, maximum: 1 }),
+	loss: Type.Number({ minimum: 0 }),
+	dataset_access_log: Type.Tuple([Type.Literal("validation")]),
+});
+const evidenceSchema = Type.Intersect([
+	validationSchema,
+	Type.Object({
+		checkpoint_sha256: hashSchema,
+		run_metadata_sha256: hashSchema,
+	}),
+]);
+const evaluatedSchema = Type.Object({
+	model: Type.String(),
+	historySha256: hashSchema,
+	validation: evidenceSchema,
+});
+const reviewSchema = Type.Object({
+	status: Type.Literal("approved_by_narrow_policy"),
+	model_sha256: hashSchema,
+	architecture_sha256: hashSchema,
+});
+const checkpointSchema = Type.Object(
+	{
+		identity: hashSchema,
+		supervisorSha256: Type.Optional(hashSchema),
+		sources: Type.Record(Type.String(), hashSchema),
+		configs: Type.Optional(Type.Record(Type.String(), hashSchema)),
+	},
+	{ additionalProperties: false },
 );
 
-export interface ExecutorCheckpoint {
-	identity: string;
-	supervisorSha256?: string;
-	sources: Record<string, string>;
+// 独立评估器输出是领域信任边界，控制器只读取通过校验的目标指标。
+export function tinyEvaluation(target: number | null): EvaluationProtocol {
+	return {
+		objectives: [{ metric: "accuracy", direction: "maximize", min: 0, max: 1, target }],
+		validate(result: unknown): Static<typeof validationSchema> {
+			if (!Check(validationSchema, result))
+				throw new ExperimentFailure(
+					"evidence_integrity",
+					"Best selection requires valid independent validation evidence",
+				);
+			return result;
+		},
+	};
 }
-export interface TaskExecutor {
-	original: string;
-	config: string;
-	prepare(id: string, content: string, rationale: string, signal: AbortSignal): Promise<Prepared>;
-	run(prepared: Prepared, role: "baseline" | "candidate", signal: AbortSignal): Promise<Evaluated>;
-	deliver(best: Evaluated): Promise<Record<string, unknown>>;
-}
+export const tinyExperimentDomain: ExperimentDomain = {
+	id: "tiny-xor-v1",
+	version: 1,
+	validateSpec: validateTaskSpec,
+	acceptsLegacy: (spec): boolean => spec.version === 1,
+	async open({ repo, root, python, budget, saved, commandCount }): Promise<CpuTaskExecutor> {
+		const executor = new CpuTaskExecutor(repo, root, python, budget, validateTaskSpec(budget.spec));
+		await executor.initialize(saved, commandCount);
+		return executor;
+	},
+};
 const scripts = [
 	"task.json",
 	"common.py",
@@ -97,29 +125,37 @@ async function publishFile(source: string, destination: string): Promise<void> {
 			throw new Error(`Existing delivery changed: ${destination}`);
 	}
 }
-export class CpuTaskExecutor implements TaskExecutor {
+export class CpuTaskExecutor implements DurableExperimentAdapter {
 	original = "";
 	config = "";
+	readonly evaluation: EvaluationProtocol;
+	readonly reportNotes = [
+		"Validation only, one seed. Recheck: python examples/tiny-ml-eval/validate_only.py --run <workspace>/best",
+		...REVIEW_NOTES,
+	];
 	private trusted = new Map<string, string>();
-	private prepared = new Map<string, Prepared>();
-	private launched = new Set<string>();
+	private prepared = new Map<string, Candidate>();
 	private counter = 0;
 	private identity = "";
 	private supervisorSha256?: string;
 	private sources: Record<string, string> = {};
+	private configs: Record<string, string> = {};
+	private readonly spec: TaskSpec;
 	recordCommand?: (operation: WorkerOperation) => Promise<void>;
 	recordPublishedBest?: () => Promise<void>;
 	readonly repo: string;
 	readonly root: string;
 	readonly python: string;
 	readonly budget: TaskBudget;
-	constructor(repo: string, root: string, python: string, budget: TaskBudget) {
+	constructor(repo: string, root: string, python: string, budget: TaskBudget, spec: TaskSpec) {
 		this.repo = repo;
 		this.root = root;
 		this.python = python;
 		this.budget = budget;
+		this.spec = spec;
+		this.evaluation = tinyEvaluation(spec.version === 1 ? spec.target_accuracy : spec.objective.target);
 	}
-	async initialize(saved?: ExecutorCheckpoint, commandCount = 0): Promise<void> {
+	async initialize(saved?: AdapterCheckpoint, commandCount = 0): Promise<void> {
 		if (!saved) for (const name of ["sources", "runs", "commands", "tmp"]) await mkdir(join(this.root, name));
 		this.original = await readFile(join(this.repo, "examples/tiny-ml-task/model.py"), "utf8");
 		this.config = await readFile(join(this.repo, "examples/tiny-ml-task/config.json"), "utf8");
@@ -133,19 +169,24 @@ export class CpuTaskExecutor implements TaskExecutor {
 		// 单独绑定监管脚本，保留已确认的 WP-05.2 候选指纹。
 		const supervisor = join(this.repo, "examples/tiny-ml-eval/supervise.py");
 		this.supervisorSha256 = sha256(await readFile(supervisor));
+		if (saved && !Check(checkpointSchema, saved)) throw new Error("Invalid Tiny adapter checkpoint");
 		if (saved?.supervisorSha256 && saved.supervisorSha256 !== this.supervisorSha256)
 			throw new Error("Worker supervisor changed since task approval");
 		this.trusted.set(supervisor, this.supervisorSha256);
 		if (saved) {
 			// 只信任首次提交的输入身份；恢复时把候选绑定到任务内的固定路径。
 			if (saved.identity !== this.identity) throw new Error("Trusted inputs changed since task approval");
+			const configs = saved.configs ?? {};
+			if (Object.keys(configs).some((id) => !Object.hasOwn(saved.sources, id) || this.spec.version !== 2))
+				throw new ExperimentFailure("evidence_integrity", "Unexpected saved candidate configuration");
 			for (const [id, hash] of Object.entries(saved.sources)) {
 				if (!/^(baseline|exp-[1-9][0-9]*)$/.test(id)) throw new Error("Invalid saved candidate ID");
 				const source = join(this.root, "sources", id);
 				this.trusted.set(join(source, "model.py"), hash);
-				this.trusted.set(join(source, "config.json"), sha256(this.config));
+				this.trusted.set(join(source, "config.json"), saved.configs?.[id] ?? sha256(this.config));
 			}
 			this.sources = { ...saved.sources };
+			this.configs = { ...configs };
 			this.counter = commandCount;
 			await this.verify();
 			return;
@@ -155,19 +196,28 @@ export class CpuTaskExecutor implements TaskExecutor {
 		});
 	}
 	// 运行记录使用账本里的序号，进程重启后不会覆盖既有命令文件。
-	checkpoint(): ExecutorCheckpoint {
-		return { identity: this.identity, supervisorSha256: this.supervisorSha256, sources: { ...this.sources } };
+	checkpoint(): AdapterCheckpoint {
+		return {
+			identity: this.identity,
+			supervisorSha256: this.supervisorSha256,
+			sources: { ...this.sources },
+			configs: { ...this.configs },
+		};
 	}
 
+	// 已完成的结构审查可重新运行，训练及写入评估工件的步骤继续保守处理。
+	isReadOnly(operation: WorkerOperation): boolean {
+		return operation.script === "review_candidate.py";
+	}
 	async verifyCommand(operation: Extract<WorkerOperation, { recordSha256: string }>): Promise<void> {
 		const path = join(this.root, "commands", `${String(operation.id).padStart(3, "0")}.json`);
 		if (sha256(await readFile(path)) !== operation.recordSha256) throw new Error("Worker evidence changed");
 	}
-	private async verify() {
+	private async verify(): Promise<void> {
 		for (const [path, hash] of this.trusted) {
 			const stat = await lstat(path);
 			if (!stat.isFile() || stat.isSymbolicLink() || sha256(await readFile(path)) !== hash)
-				throw new Error("Trusted input or candidate snapshot changed");
+				throw new ExperimentFailure("evidence_integrity", "Trusted input or candidate snapshot changed");
 		}
 	}
 	private async command(
@@ -176,7 +226,7 @@ export class CpuTaskExecutor implements TaskExecutor {
 		args: string[],
 		signal: AbortSignal,
 		fingerprint?: string,
-		reservation?: { role: "baseline" | "candidate"; steps: number },
+		reservation?: TrainingReservation,
 	): Promise<string> {
 		signal.throwIfAborted();
 		await this.verify();
@@ -262,12 +312,43 @@ export class CpuTaskExecutor implements TaskExecutor {
 			if (this.budget.remainingWallMs <= 0) throw new BudgetStop("wall_budget_exhausted");
 			if (this.budget.computeMs >= this.budget.spec.budget.compute_process_seconds * 1000)
 				throw new BudgetStop("compute_budget_exhausted");
-			throw new Error(`Fixed worker ${script} failed (${result.stopped ?? result.code}); see commands/${id}.json`);
+			const message = `Fixed worker ${script} failed (${result.stopped ?? result.code}); see commands/${id}.json`;
+			// 只有可信脚本明确拒绝且已收到正常退出证据，才允许控制器考虑修订。
+			if (!result.stopped && result.code === 1) {
+				if (script === "review_candidate.py" && result.stderr.startsWith("Candidate policy rejected:"))
+					throw new ExperimentFailure("invalid_candidate", message);
+				if (script === "experiment.py" && result.stderr.startsWith("Experiment failed:"))
+					throw new ExperimentFailure("domain_execution", message);
+			}
+			if (script === "validate_only.py") throw new ExperimentFailure("evidence_integrity", message);
+			throw new Error(message);
 		}
 		await this.verify();
 		return result.stdout;
 	}
-	async prepare(id: string, content: string, rationale: string, signal: AbortSignal): Promise<Prepared> {
+	// 默认值使用原始配置字节，保持旧指纹，并让显式默认值与省略参数去重。
+	private effectiveConfig(parameters: Record<string, unknown>): string {
+		const permitted = this.spec.version === 2 ? this.spec.parameters?.learning_rate : undefined;
+		if (Object.keys(parameters).some((key) => key !== "learning_rate" || !permitted))
+			throw new ExperimentFailure("permission_violation", "Permission denied: unapproved candidate parameter");
+		if (!Check(parameterProposalSchema, parameters))
+			throw new ExperimentFailure("invalid_candidate", "Invalid learning_rate type or value");
+		const rate = parameters.learning_rate;
+		if (rate === undefined) return this.config;
+		if (!permitted || rate < permitted.min || rate > permitted.max)
+			throw new ExperimentFailure("invalid_candidate", "learning_rate outside approved range");
+		// 固定配置文件已绑定可信输入，候选只能替换审批允许的一个字段。
+		const base = JSON.parse(this.config) as { epochs: number; learning_rate: number; seed: number };
+		return rate === base.learning_rate ? this.config : JSON.stringify({ ...base, learning_rate: rate });
+	}
+
+	async prepare(
+		id: string,
+		content: string,
+		rationale: string,
+		signal: AbortSignal,
+		parameters: Record<string, unknown> = {},
+	): Promise<Candidate> {
 		if (
 			!/^(baseline|exp-[1-9][0-9]*)$/.test(id) ||
 			this.prepared.has(id) ||
@@ -276,28 +357,31 @@ export class CpuTaskExecutor implements TaskExecutor {
 			rationale.length > 2000
 		)
 			throw new Error("Invalid candidate proposal");
+		const config = this.effectiveConfig(parameters);
 		const source = join(this.root, "sources", id);
 		// 未启动的基线可重做只读审查；已有源码必须和已批准的输入完全一致。
 		await mkdir(source, { recursive: true });
 		await writeVerified(join(source, "model.py"), content);
-		await writeVerified(join(source, "config.json"), this.config);
-		const review = JSON.parse(await this.command(id, "review_candidate.py", ["--candidate", source], signal)) as {
-			architecture_sha256?: unknown;
-		};
-		if (typeof review.architecture_sha256 !== "string") throw new Error("Missing architecture identity");
+		await writeVerified(join(source, "config.json"), config);
+		const review: unknown = JSON.parse(
+			await this.command(id, "review_candidate.py", ["--candidate", source], signal),
+		);
+		if (!Check(reviewSchema, review) || review.model_sha256 !== sha256(content))
+			throw new ExperimentFailure("evidence_integrity", "Invalid architecture review evidence");
 		const fingerprint = sha256(
 			JSON.stringify({
 				architecture: review.architecture_sha256,
-				config: this.config,
+				config,
 				protocol: "tiny-xor-v1",
 				trusted: this.identity,
 				device: "cpu",
 				threads: 1,
 			}),
 		);
-		const prepared = { id, fingerprint, content, rationale };
+		const prepared = { id, fingerprint, content, rationale, ...(config === this.config ? {} : { config }) };
 		this.prepared.set(id, structuredClone(prepared));
 		this.sources[id] = sha256(content);
+		if (config !== this.config) this.configs[id] = sha256(config);
 		for (const name of ["model.py", "config.json"])
 			this.trusted.set(join(source, name), sha256(await readFile(join(source, name))));
 		await writeVerified(join(source, "proposal.json"), JSON.stringify({ ...prepared, policy: review }, null, 2));
@@ -307,49 +391,43 @@ export class CpuTaskExecutor implements TaskExecutor {
 		);
 		return prepared;
 	}
-	async run(prepared: Prepared, role: "baseline" | "candidate", signal: AbortSignal): Promise<Evaluated> {
-		const baseline = role === "baseline";
+	// 两个 Smoke 步和完整训练共享同一候选的预算预留。
+	trainingSteps(role: ExperimentRole): number {
+		const { epochs } = JSON.parse(this.config) as { epochs: number };
+		if (!Number.isSafeInteger(epochs) || epochs < 1 || epochs > 120) throw new Error("Invalid fixed training config");
+		return epochs + (role === "baseline" ? 0 : 2);
+	}
+
+	async run(prepared: Candidate, reservation: TrainingReservation, signal: AbortSignal): Promise<RunResult> {
+		const baseline = reservation.role === "baseline";
 		if (
 			JSON.stringify(this.prepared.get(prepared.id)) !== JSON.stringify(prepared) ||
 			baseline !== (prepared.id === "baseline")
 		)
 			throw new Error("Unknown immutable candidate");
-		if (this.launched.has(prepared.fingerprint))
-			throw new Error("Completed or attempted identical experiment cannot be retrained");
 		const run = join(this.root, "runs", prepared.id);
 		const source = join(this.root, "sources", prepared.id);
-		const { epochs } = JSON.parse(this.config) as { epochs: number };
-		if (!Number.isSafeInteger(epochs) || epochs < 1 || epochs > 120) throw new Error("Invalid fixed training config");
-		const reservation = { role, steps: epochs + (baseline ? 0 : 2) };
-		this.budget.launch(role, reservation.steps);
-		this.launched.add(prepared.fingerprint);
 		const args = ["--candidate", source, "--output", run];
 		if (!baseline) args.push("--smoke-output", join(this.root, "runs", `${prepared.id}-smoke`));
 		await this.command(prepared.id, "experiment.py", args, signal, prepared.fingerprint, reservation);
-		const validation = JSON.parse(
-			await this.command(
-				prepared.id,
-				"validate_only.py",
-				["--run", run, "--output", join(run, "validation.json")],
-				signal,
-				prepared.fingerprint,
-			),
-		) as ValidationResult;
-		if (
-			validation.protocol !== "tiny-xor-v1" ||
-			validation.split !== "validation" ||
-			validation.level !== "full" ||
-			validation.samples !== 512 ||
-			!Number.isFinite(validation.accuracy) ||
-			validation.accuracy < 0 ||
-			validation.accuracy > 1 ||
-			!Number.isFinite(validation.loss) ||
-			JSON.stringify(validation.dataset_access_log) !== '["validation"]'
-		)
-			throw new Error("Invalid independent validation evidence");
+		const output = await this.command(
+			prepared.id,
+			"validate_only.py",
+			["--run", run, "--output", join(run, "validation.json")],
+			signal,
+			prepared.fingerprint,
+		);
+		let validation: unknown;
+		try {
+			validation = JSON.parse(output);
+		} catch {
+			throw new ExperimentFailure("evidence_integrity", "Invalid independent validation JSON");
+		}
+		if (!Check(evidenceSchema, validation))
+			throw new ExperimentFailure("evidence_integrity", "Invalid independent validation evidence");
 		// 把训练历史也绑定到成功记录，恢复时和 Checkpoint 一起核验。
 		const historySha256 = sha256(await readFile(join(run, "history.json")));
-		return {
+		const result = {
 			validation,
 			run,
 			model: prepared.content,
@@ -357,23 +435,28 @@ export class CpuTaskExecutor implements TaskExecutor {
 			id: prepared.id,
 			historySha256,
 		};
+		try {
+			await this.verifyEvaluated(result);
+		} catch (error) {
+			throw new ExperimentFailure("evidence_integrity", String(error));
+		}
+		return result;
 	}
 	// 复用与交付使用同一套哈希检查，不能仅靠文件存在判断实验完成。
 	async verifyEvaluated(
-		best: Evaluated,
+		best: RunResult,
 		directory = join(this.root, "runs", best.id),
 	): Promise<Record<string, string>> {
 		if (!/^(baseline|exp-[1-9][0-9]*)$/.test(best.id) || best.run !== join(this.root, "runs", best.id))
 			throw new Error("Invalid evaluated run identity");
+		if (!Check(evaluatedSchema, best)) throw new ExperimentFailure("evidence_integrity", "Invalid saved evaluation");
 		await this.verify();
 		const checkpoint = await readFile(join(directory, "checkpoint.pt"));
 		if (sha256(checkpoint) !== best.validation.checkpoint_sha256)
 			throw new Error("Best checkpoint changed since independent evaluation");
 		if (sha256(await readFile(join(directory, "history.json"))) !== best.historySha256)
 			throw new Error("Training history changed since independent evaluation");
-		const savedValidation = JSON.parse(
-			await readFile(join(directory, "validation.json"), "utf8"),
-		) as ValidationResult;
+		const savedValidation = JSON.parse(await readFile(join(directory, "validation.json"), "utf8")) as unknown;
 		if (JSON.stringify(savedValidation) !== JSON.stringify(best.validation))
 			throw new Error("Independent validation record changed");
 		const rawMetadata = await readFile(join(directory, "run.json"));
@@ -386,13 +469,16 @@ export class CpuTaskExecutor implements TaskExecutor {
 				throw new Error("Best model snapshot changed");
 		if (metadata.candidate_sha256["model.py"] !== sha256(best.model) || this.sources[best.id] !== sha256(best.model))
 			throw new Error("Saved candidate does not match evaluated model");
+		if (metadata.candidate_sha256["config.json"] !== (this.configs[best.id] ?? sha256(this.config)))
+			throw new ExperimentFailure("evidence_integrity", "Saved candidate does not match evaluated configuration");
 		return metadata.candidate_sha256;
 	}
 
 	// 终态恢复也核验公开交付副本，防止把被改动的权重或配置当成已交付结果。
-	async verifyDelivery(best: Evaluated, delivery: Record<string, unknown>): Promise<void> {
+	async verifyDelivery(best: RunResult, delivery: Record<string, unknown>): Promise<void> {
 		const directory = join(this.root, "best");
 		const hashes = await this.verifyEvaluated(best, directory);
+		if (!Check(evaluatedSchema, best)) throw new ExperimentFailure("evidence_integrity", "Invalid saved evaluation");
 		const expected = {
 			"best_model.pt": best.validation.checkpoint_sha256,
 			"model.py": hashes["model.py"],
@@ -415,8 +501,9 @@ export class CpuTaskExecutor implements TaskExecutor {
 		}
 	}
 
-	async deliver(best: Evaluated): Promise<Record<string, unknown>> {
+	async deliver(best: RunResult): Promise<ArtifactManifest> {
 		const hashes = await this.verifyEvaluated(best);
+		if (!Check(evaluatedSchema, best)) throw new ExperimentFailure("evidence_integrity", "Invalid saved evaluation");
 		const destination = join(this.root, "best");
 		const staging = await mkdtemp(join(this.root, ".delivery-"));
 		const stagedBest = join(staging, "best");

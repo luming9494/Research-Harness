@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- AXIOM task startup now rejects native tool selections that filter out its four domain tools before accepting a model prompt; CPU-only acceptance uses `--no-builtin-tools`, not `--no-tools`.
 - AXIOM Tiny Task now loads explicitly through `npm run axiom` rather than project extension auto-discovery, so the development Pi does not depend on the AXIOM build. Stopping or unloading the task cancels pending executors before restoring the prior tool selection.
 - AXIOM single-candidate optimization now returns independently reloaded Smoke evidence and permits baseline delivery after a failed Smoke attempt.
 - Fixed migrated AXIOM modules using relative `.js` imports incompatible with the monorepo source checks.

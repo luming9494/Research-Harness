@@ -7,7 +7,11 @@ import { fauxAssistantMessage, fauxToolCall, type JsonObject } from "@earendil-w
 import { afterEach, describe, expect, it } from "vitest";
 import axiomTiny from "../../../../axiom/extensions/axiom-tiny.ts";
 import { DEFAULT_BUDGET, TASK_RULES } from "../../src/axiom/execution/task-spec.ts";
+import { parseArgs } from "../../src/cli/args.ts";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
+import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
+import { createAgentSession } from "../../src/core/sdk.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, createTestUiContext, getToolResult, type Harness } from "./harness.ts";
 
 const repo = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -80,6 +84,100 @@ async function summary(root: string) {
 }
 
 describe("AXIOM WP-04 native Pi extension", () => {
+	it.skipIf(!existsSync(python)).each(["--no-tools", "--no-builtin-tools"])(
+		"checks actual SDK tool declarations after approval with %s",
+		async (flag) => {
+			const harness = await createHarness({
+				settings: { compaction: { enabled: false }, retry: { enabled: false } },
+			});
+			cleanups.push(() => harness.cleanup());
+			const loader = new DefaultResourceLoader({
+				cwd: repo,
+				agentDir: harness.tempDir,
+				settingsManager: harness.settingsManager,
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				extensionFactories: [axiomTiny],
+			});
+			await loader.reload();
+			const args = parseArgs([flag]);
+			const { session } = await createAgentSession({
+				cwd: repo,
+				agentDir: harness.tempDir,
+				modelRuntime: harness.session.modelRuntime,
+				model: harness.getModel(),
+				resourceLoader: loader,
+				settingsManager: harness.settingsManager,
+				sessionManager: SessionManager.inMemory(),
+				noTools: args.noTools ? "all" : "builtin",
+			});
+			let workspace: string | undefined;
+			cleanups.push(async () => {
+				await session.prompt("/axiom-task-stop");
+				session.dispose();
+				if (workspace) await rm(workspace, { recursive: true, force: true });
+			});
+			await session.bindExtensions({
+				uiContext: createTestUiContext({
+					confirm: async () => true,
+					notify: (message) => {
+						if (message.startsWith("Task ready: ")) workspace = message.slice(12).split(". Ask Pi")[0];
+					},
+				}),
+			});
+			const names = [
+				"axiom_task_inspect",
+				"axiom_task_baseline",
+				"axiom_task_candidate",
+				"axiom_task_finish",
+			].sort();
+			expect(session.getActiveToolNames()).toEqual([]);
+			if (args.noTools) {
+				const errors: string[] = [];
+				session.extensionRunner.onError((error) => errors.push(error.error));
+				await session.prompt(`/axiom-task ${JSON.stringify(taskSpec())}`);
+				expect(errors).toHaveLength(1);
+				expect(errors[0]).toContain("Use --no-builtin-tools");
+				expect(session.getActiveToolNames()).toEqual([]);
+				expect(harness.faux.state.callCount).toBe(0);
+				expect(workspace).toBeUndefined();
+				workspace = errors[0].split("Evidence: ")[1];
+				expect(await summary(workspace)).toMatchObject({
+					status: "cancelled",
+					budget: { tokens_actual: 0, model_requests: 0 },
+				});
+				return;
+			}
+			await session.prompt(`/axiom-task ${JSON.stringify(taskSpec())}`);
+			expect(workspace).toBeDefined();
+			expect(session.getActiveToolNames().sort()).toEqual(names);
+			harness.setResponses([
+				(context) => {
+					const declarations = context.messages.flatMap((message) =>
+						message.role === "system" ? (message.toolsAdded ?? []) : [],
+					);
+					expect(declarations.map((tool) => tool.name).sort()).toEqual(names);
+					expect(declarations.find((tool) => tool.name === "axiom_task_candidate")?.parameters).toMatchObject({
+						type: "object",
+						properties: { content: { type: "string" }, rationale: { type: "string" } },
+					});
+					return fauxAssistantMessage([fauxToolCall("axiom_task_inspect", {})], { stopReason: "toolUse" });
+				},
+				fauxAssistantMessage("Offline schema acceptance complete."),
+			]);
+			await session.prompt("Execute the free tool-declaration regression.");
+			const results = session.messages.filter((message) => message.role === "toolResult");
+			expect(results).toHaveLength(1);
+			expect(results[0]).toMatchObject({ toolName: "axiom_task_inspect", isError: false });
+			await session.prompt("/axiom-task-stop");
+			expect(session.getActiveToolNames()).toEqual([]);
+		},
+		30000,
+	);
+
 	it("does not register or enable task tools without approval", async () => {
 		const { harness } = await start(false);
 		expect(harness.session.getActiveToolNames()).toEqual(["read"]);

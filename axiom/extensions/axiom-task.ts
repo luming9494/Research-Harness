@@ -100,6 +100,12 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       prior = pi.getActiveTools();
       active = true;
       pi.setActiveTools(names);
+      // Native CLI allowlists can filter dynamic tools; fail before accepting a paid task prompt.
+      const activated = pi.getActiveTools();
+      if (activated.length !== names.length || names.some(name => !activated.includes(name))) {
+        await close();
+        throw new Error(`AXIOM task tools are disabled by the native tool selection. Use --no-builtin-tools instead of --no-tools, or allow all four axiom_task tools. Evidence: ${task.root}`);
+      }
       ctx.ui.notify(`Task ready: ${task.root}. Ask Pi to inspect, run baseline and optimize. /axiom-task-stop restores tools.`, "info");
     },
   });

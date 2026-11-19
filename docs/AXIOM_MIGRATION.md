@@ -33,7 +33,7 @@
 
 ## 3. 未迁移，不要误判为已经恢复
 
-- WP-04 的旧独立 Agent/模型请求包装：**刻意不迁移**。多轮 TaskSpec、预算、CPU 执行与历史最佳领域能力已从本地源码迁入；真实模型自主实验仍未验收。
+- WP-04 的旧独立 Agent/模型请求包装：**刻意不迁移**。已迁入多轮 TaskSpec、预算、CPU 执行与历史最佳机制，并通过 Pi 原生 RPC 完成可信 Tiny CPU 的真实模型自主优化主流程验收。
 - **NVIDIA NIM** 多轮 Function Calling 与 **NIM → DeepSeek** 供应商回退代码：本地版本尚未推送。本次不重写 Pi 的模型配置/路由。
 - 旧 `src/agent/smoke-agent.ts`、`optimize-agent.ts`、`src/cli.ts`、`src/agent.ts` 的 Session 初始化、事件订阅、readline 与供应商封装：**刻意不迁移**，避免重复实现 Pi。
 - 原来的 React Web 离线前端：暂缓，不属于新的 CLI 主线。
@@ -69,7 +69,7 @@ npm run axiom -- --tui-mode regular
 
 确认出现 Tiny Task 工作目录，要求 Agent 先读取 model.py 和 baseline，再提交单个方案，训练并交付 `selected/`、`decision.json` 与 `patch.diff`。用系统生成文件作为真实依据，不以 LLM 自述为验收结论。
 
-本地 Windows 已通过构建、静态检查、Python 真实训练、Node 策略和 Pi Session 集成回归，以及编译后 CLI 的离线 RPC 命令发现。集成使用 Pi 现有 faux provider 与人工候选，未调用收费 API；实际交互 TUI、真实模型自主提出候选仍未验收。测试范围与真实产物说明见 [AXIOM_VALIDATION.md](AXIOM_VALIDATION.md)。
+本地 Windows 已通过构建、静态检查、Python 真实训练、Node 策略和 Pi Session 集成回归，以及编译后 CLI 的离线 RPC 命令发现。离线集成使用 faux provider 与人工候选。随后单独通过原生 RPC 完成两阶段真实 LLM Tiny 主流程验收。终端 TUI 的键盘与视觉交互待验收。测试范围与真实产物说明见 [AXIOM_VALIDATION.md](AXIOM_VALIDATION.md)。
 
 ## 6. WP-04 本地源码核对与适配
 
@@ -82,7 +82,7 @@ npm run axiom -- --tui-mode regular
 - 不迁旧 `piDecision` 的 Session 创建、消息拼装、模型/凭据注册及供应商 fallback。Token 直接接 Pi 上下文事件准入和 `message_end` usage，不以工具次数冒充 Token。
 - Pi 原生请求路径增加已取消 signal 的发出前检查，避免扩展取消准入后仍调用 provider；其余 Session/TUI/模型配置不另写。
 
-当前仅做无费用回归和真实 CPU 校准。后续供应商/TUI 验收必须单独批准；跨会话恢复、远程 GPU 和 NIM 回退没有因此恢复。
+此迁移阶段使用无费用回归和真实 CPU 校准。后续真实模型验收另见上节。跨会话恢复、远程 GPU 和 NIM 回退仍待实现。
 
 ## 7. Source licensing
 

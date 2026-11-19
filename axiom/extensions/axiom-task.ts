@@ -15,7 +15,7 @@ const tools = [
   { name: "inspect", description: "Read immutable Tiny Task rules, fixed model/config, real history best, validation evidence and budget.", parameters: empty },
   { name: "baseline", description: "Train the fixed baseline once and independently evaluate validation. Required before candidates.", parameters: empty },
   // 工具只公开受限学习率字段，任务是否准许以及具体范围以原审批为准。
-  { name: "candidate", description: "Submit one complete model.py and a hypothesis. Only nn.Linear/Sequential/ReLU/Tanh, literal dimensions, 2 inputs/outputs, <=1024 parameters. In v3, use evidence to name observations supporting your hypothesis. An explicit learning_rate requires range approval. The host decides promotion and delivery. No polling.", parameters: Type.Object({ content: Type.String({ maxLength: 8192 }), rationale: Type.String({ minLength: 1, maxLength: 2000 }), evidence: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })), parameters: Type.Optional(parameterProposalSchema) }, { additionalProperties: false }) },
+  { name: "candidate", description: "Submit one complete model.py and a hypothesis. Only nn.Linear/Sequential/ReLU/Tanh, literal dimensions, 2 inputs/outputs, <=1024 parameters. In v3/v4 give evidence; in v4 also give evidence_refs containing prior IDs such as baseline or exp-1. An explicit learning_rate requires range approval. The host decides promotion and delivery. No polling.", parameters: Type.Object({ content: Type.String({ maxLength: 8192 }), rationale: Type.String({ minLength: 1, maxLength: 2000 }), evidence: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })), evidence_refs: Type.Optional(Type.Array(Type.String({ pattern: "^(baseline|exp-[1-9][0-9]*)$" }), { minItems: 1, maxItems: 8, uniqueItems: true })), parameters: Type.Optional(parameterProposalSchema) }, { additionalProperties: false }) },
   { name: "finish", description: "Stop experiments and deliver the independently validated history best. Never self-report metrics.", parameters: empty },
 ] as const;
 const names = tools.map(tool => `axiom_task_${tool.name}`);
@@ -55,7 +55,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
     }
   });
   pi.on("before_agent_start", event => {
-    if (active) event.systemPromptOptions.sections.axiom_task = "Trusted Tiny Task Optimize: inspect, run baseline, then propose candidates from independent validation feedback. Only include learning_rate if approved. In v3, give a hypothesis and cite observed candidate or baseline evidence before each new proposal. Treat Proxy as screening and Full as the official result. The host decides advancement. No final-test, arbitrary shell, file edits or reference implementation access.";
+    if (active) event.systemPromptOptions.sections.axiom_task = "Trusted Tiny Task Optimize: inspect, run baseline, then propose candidates from independent validation feedback. Only include learning_rate if approved. In v3/v4 give a hypothesis and cite observed feedback. In v4 supply evidence_refs with prior IDs and use the Pareto frontier to explore quality and model-size trade-offs. The host decides advancement and delivery, and only Full scores are official. No final-test, arbitrary shell, file edits or reference implementation access.";
   });
   pi.on("context_with_system", async (event, ctx) => {
     if (!active || !task) return;

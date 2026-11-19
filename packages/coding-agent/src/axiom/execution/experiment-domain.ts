@@ -10,6 +10,7 @@ export interface ExperimentTaskSpec {
 	goal: string;
 	max_revisions?: number;
 	fidelity?: { strategy: "full_only" | "multi_fidelity"; max_full: number };
+	delivery_preference?: DeliveryPreference;
 	budget: {
 		max_experiments: number;
 		wall_seconds: number;
@@ -27,6 +28,25 @@ export interface Objective {
 	min: number;
 	max: number;
 	target: number | null;
+	resolution?: number;
+	integer?: boolean;
+}
+
+export type DeliveryPreference =
+	| { strategy: "quality" | "lightweight" | "frontier" }
+	| { strategy: "minimum_accuracy"; minimum_accuracy: number };
+
+export interface ParetoPoint {
+	id: string;
+	fingerprint: string;
+	metrics: Record<string, number>;
+}
+
+export interface ParetoDecision {
+	preference: DeliveryPreference;
+	reason: "quality_first" | "complexity_first" | "accuracy_floor_met" | "complete_frontier" | "no_feasible_candidate";
+	primary?: string;
+	selected: ParetoPoint[];
 }
 
 export type EvaluationResult = Record<string, unknown>;
@@ -64,6 +84,13 @@ export const proposalSchema = Type.Object(
 		content: Type.String({ maxLength: 8192 }),
 		rationale: Type.String({ minLength: 1, maxLength: 2000 }),
 		evidence: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
+		evidence_refs: Type.Optional(
+			Type.Array(Type.String({ pattern: "^(baseline|exp-[1-9][0-9]*)$" }), {
+				minItems: 1,
+				maxItems: 8,
+				uniqueItems: true,
+			}),
+		),
 		parameters: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 	},
 	{ additionalProperties: false },
@@ -167,6 +194,10 @@ export interface ExperimentAdapter {
 	run(candidate: Candidate, reservation: TrainingReservation, signal: AbortSignal): Promise<RunResult>;
 	verifyEvaluated(run: RunResult): Promise<unknown>;
 	deliver(best: RunResult): Promise<ArtifactManifest>;
+	paretoDelivery?: {
+		publish(decision: ParetoDecision, runs: readonly RunResult[]): Promise<ArtifactManifest>;
+		verify(decision: ParetoDecision, runs: readonly RunResult[], manifest: ArtifactManifest): Promise<void>;
+	};
 }
 
 export interface DurableExperimentAdapter extends ExperimentAdapter {

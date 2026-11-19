@@ -12,16 +12,19 @@ import {
 	type Candidate,
 	type DurableExperimentAdapter,
 	type EvaluationProtocol,
+	type ExperimentAdapter,
 	type ExperimentDomain,
 	ExperimentFailure,
 	type ExperimentRole,
 	type FidelityAdapter,
+	type Objective,
 	type RunResult,
 	type StageResult,
 	type TrainingReservation,
 	type TrainingStage,
 	type WorkerOperation,
 } from "./experiment-domain.ts";
+import { publishParetoArtifacts, verifyParetoArtifacts } from "./pareto-artifacts.ts";
 import { type ProcessResult, runProcess, type WorkerIdentity } from "./process.ts";
 import { BudgetStop, type TaskBudget } from "./task-budget.ts";
 import { parameterProposalSchema, REVIEW_NOTES, sha256, type TaskSpec, validateTaskSpec } from "./task-spec.ts";
@@ -60,6 +63,11 @@ const stagedEvidenceSchema = Type.Object({
 	}),
 });
 const fidelityProtocol = "tiny-xor-fidelity-v1";
+const paretoValidator = "pareto_validate.py";
+const parameterEvidence = Type.Object({
+	parameters: Type.Integer({ minimum: 1, maximum: 1024 }),
+	parameter_evaluator_sha256: hashSchema,
+});
 const reviewSchema = Type.Object({
 	status: Type.Literal("approved_by_narrow_policy"),
 	model_sha256: hashSchema,
@@ -69,6 +77,7 @@ const checkpointSchema = Type.Object(
 	{
 		identity: hashSchema,
 		supervisorSha256: Type.Optional(hashSchema),
+		paretoSha256: Type.Optional(hashSchema),
 		sources: Type.Record(Type.String(), hashSchema),
 		configs: Type.Optional(Type.Record(Type.String(), hashSchema)),
 	},
@@ -145,10 +154,10 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 	config = "";
 	readonly evaluation: EvaluationProtocol;
 	readonly fidelity?: FidelityAdapter;
-	readonly reportNotes = [
-		"Validation only, one seed. Recheck: python examples/tiny-ml-eval/validate_only.py --run <workspace>/best",
-		...REVIEW_NOTES,
-	];
+	readonly paretoDelivery?: ExperimentAdapter["paretoDelivery"];
+	readonly reportNotes: readonly string[];
+	private readonly stageProtocol: string;
+	private paretoSha256?: string;
 	private trusted = new Map<string, string>();
 	private prepared = new Map<string, Candidate>();
 	private counter = 0;
@@ -169,8 +178,48 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		this.python = python;
 		this.budget = budget;
 		this.spec = spec;
-		this.evaluation = tinyEvaluation(spec.version === 1 ? spec.target_accuracy : spec.objective.target);
-		if (spec.version === 3) {
+		this.stageProtocol = spec.version === 4 ? "tiny-xor-pareto-v1" : fidelityProtocol;
+		if (spec.version === 4) {
+			const objectives: [Objective, ...Objective[]] = [
+				{ metric: "accuracy", direction: "maximize", min: 0, max: 1, target: null, resolution: 1e-12 },
+				{ metric: "parameters", direction: "minimize", min: 1, max: 1024, target: null, integer: true },
+			];
+			if (spec.objectives.length === 3)
+				objectives.push({
+					metric: "loss",
+					direction: "minimize",
+					min: 0,
+					max: 1e6,
+					target: null,
+					resolution: 1e-9,
+				});
+			this.evaluation = {
+				objectives,
+				validate(result: unknown): Record<string, unknown> {
+					if (!Check(validationSchema, result) || !Check(parameterEvidence, result))
+						throw new ExperimentFailure("evidence_integrity", "Invalid independent Pareto evidence");
+					return result;
+				},
+			};
+			const verify = (run: RunResult, directory?: string): Promise<unknown> => this.verifyEvaluated(run, directory);
+			this.paretoDelivery = {
+				publish: (decision, runs): Promise<ArtifactManifest> =>
+					publishParetoArtifacts(root, decision, runs, deliveryFiles, verify),
+				verify: (decision, runs, manifest): Promise<void> =>
+					verifyParetoArtifacts(root, decision, runs, deliveryFiles, manifest, verify),
+			};
+		} else this.evaluation = tinyEvaluation(spec.version === 1 ? spec.target_accuracy : spec.objective.target);
+		this.reportNotes =
+			spec.version === 4
+				? [
+						"Validation only, one seed. Recheck: python examples/tiny-ml-eval/pareto_validate.py --run <workspace>/pareto-delivery/<id>",
+						"Only independent Full evaluations enter the Pareto frontier. Accuracy-only Proxy screening is disabled.",
+					]
+				: [
+						"Validation only, one seed. Recheck: python examples/tiny-ml-eval/validate_only.py --run <workspace>/best",
+						...REVIEW_NOTES,
+					];
+		if (spec.version >= 3) {
 			this.fidelity = {
 				steps: (stage): number => this.stepsAt(stage),
 				run: (candidate, reservation, signal): Promise<StageResult> =>
@@ -207,6 +256,14 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		if (saved?.supervisorSha256 && saved.supervisorSha256 !== this.supervisorSha256)
 			throw new Error("Worker supervisor changed since task approval");
 		this.trusted.set(supervisor, this.supervisorSha256);
+		// 只给 v4 绑定独立参数量核验器，旧任务的评估器和候选身份保持兼容。
+		if (this.spec.version === 4) {
+			const path = join(this.repo, "examples/tiny-ml-eval", paretoValidator);
+			this.paretoSha256 = sha256(await readFile(path));
+			if (saved && saved.paretoSha256 !== this.paretoSha256)
+				throw new ExperimentFailure("evidence_integrity", "Pareto evaluator changed since approval");
+			this.trusted.set(path, this.paretoSha256);
+		}
 		if (saved) {
 			// 只信任首次提交的输入身份；恢复时把候选绑定到任务内的固定路径。
 			if (saved.identity !== this.identity) throw new Error("Trusted inputs changed since task approval");
@@ -234,6 +291,7 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		return {
 			identity: this.identity,
 			supervisorSha256: this.supervisorSha256,
+			...(this.paretoSha256 ? { paretoSha256: this.paretoSha256 } : {}),
 			sources: { ...this.sources },
 			configs: { ...this.configs },
 		};
@@ -358,7 +416,8 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 				)
 					throw new ExperimentFailure("domain_execution", message);
 			}
-			if (script === "validate_only.py") throw new ExperimentFailure("evidence_integrity", message);
+			if (script === "validate_only.py" || script === paretoValidator)
+				throw new ExperimentFailure("evidence_integrity", message);
 			throw new Error(message);
 		}
 		await this.verify();
@@ -423,6 +482,7 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 				trusted: this.identity,
 				device: "cpu",
 				threads: 1,
+				...(this.paretoSha256 ? { paretoEvaluator: this.paretoSha256 } : {}),
 			}),
 		);
 		const prepared = { id, fingerprint, content, rationale, ...(config === this.config ? {} : { config }) };
@@ -473,13 +533,13 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 			stage,
 		);
 		const result = await this.evaluateRun(candidate, run, signal, key, stage);
-		const evidence = { stage, protocol: fidelityProtocol, key, result };
+		const evidence = { stage, protocol: this.stageProtocol, key, result };
 		await this.verifyStage(candidate, evidence);
 		return evidence;
 	}
 
 	private stageKey(candidate: Candidate, stage: TrainingStage): string {
-		return sha256(JSON.stringify([fidelityProtocol, candidate.fingerprint, stage]));
+		return sha256(JSON.stringify([this.stageProtocol, candidate.fingerprint, stage]));
 	}
 
 	private stageDirectory(id: string, stage: TrainingStage): string {
@@ -488,7 +548,7 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 
 	private async verifyStage(candidate: Candidate, evidence: StageResult): Promise<void> {
 		if (
-			evidence.protocol !== fidelityProtocol ||
+			evidence.protocol !== this.stageProtocol ||
 			evidence.key !== this.stageKey(candidate, evidence.stage) ||
 			evidence.result.fingerprint !== candidate.fingerprint ||
 			evidence.result.id !== candidate.id ||
@@ -535,7 +595,7 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 	): Promise<RunResult & { model: string; historySha256: string }> {
 		const output = await this.command(
 			prepared.id,
-			"validate_only.py",
+			this.spec.version === 4 ? paretoValidator : "validate_only.py",
 			["--run", run, "--output", join(run, "validation.json")],
 			signal,
 			key,
@@ -587,8 +647,19 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 		const rawMetadata = await readFile(join(directory, "run.json"));
 		const metadata = JSON.parse(rawMetadata.toString("utf8")) as {
 			candidate_sha256: Record<string, string>;
+			parameter_count?: number;
 		};
 		if (sha256(rawMetadata) !== best.validation.run_metadata_sha256) throw new Error("Best run metadata changed");
+		if (
+			this.spec.version === 4 &&
+			(!Check(parameterEvidence, best.validation) ||
+				best.validation.parameter_evaluator_sha256 !== this.paretoSha256 ||
+				best.validation.parameters !== metadata.parameter_count)
+		)
+			throw new ExperimentFailure(
+				"evidence_integrity",
+				"Independent parameter count does not match the trusted training record",
+			);
 		for (const name of ["model.py", "config.json"])
 			if (sha256(await readFile(join(directory, "candidate", name))) !== metadata.candidate_sha256[name])
 				throw new Error("Best model snapshot changed");

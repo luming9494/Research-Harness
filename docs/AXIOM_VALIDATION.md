@@ -1,5 +1,11 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-06.3 Pareto 验收
+
+固定候选池的单目标最优模型为 42 参数、accuracy 0.998046875。按 accuracy 至少 0.95 后取最小模型，改选 12 参数、accuracy 0.990234375。完整 Pareto 交付经过跨进程恢复和逐成员核验。真实 DeepSeek Flash 基于前轮证据自主提出三个候选，最终交付达标的 12 参数模型。Pi 记录 5 次请求、24,546 Token、估算费用 USD 0.004561512。[固定对照、Pareto 图和真实模型记录](AXIOM_PARETO.md)
+
+Windows 离线构建和静态检查通过。Pareto 定向测试 4/4，全量 ML 98/98，覆盖历史 v1–v3 任务。真实模型验收独立于离线回归。
+
 ## WP-06.2 分级评估验收
 
 真实 DeepSeek Flash 经原生 Pi RPC 依次提出三个不同候选，并在第二、三轮引用此前的 Proxy 和 Full 反馈。三个候选均晋级，最终交付首个达到 0.998046875 Full accuracy 的候选，交付权重独立重载一致。Pi 记录 5 次请求、23,513 Token、估算费用 USD 0.004361304。固定候选池对照与故障回归单独运行。[WP-06.2 多保真验收记录](AXIOM_MULTI_FIDELITY.md)

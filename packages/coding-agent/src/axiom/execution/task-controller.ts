@@ -15,6 +15,8 @@ import {
 	type FailureCategory,
 	type FidelityAdapter,
 	objectiveValue,
+	type ParetoDecision,
+	type ParetoPoint,
 	type RunResult,
 	type StageResult,
 	type TrainingStage,
@@ -22,6 +24,7 @@ import {
 	type WorkerOperation,
 } from "./experiment-domain.ts";
 import { decidePromotion, type PromotionDecision } from "./fidelity-policy.ts";
+import { chooseParetoDelivery, paretoFrontier, paretoPoint } from "./pareto.ts";
 import { type BudgetReason, BudgetStop, TaskBudget } from "./task-budget.ts";
 import { tinyEvaluation, tinyExperimentDomain } from "./task-executor.ts";
 
@@ -35,12 +38,14 @@ export type StopReason =
 	| "ledger_commit_failure"
 	| "delivery_integrity_failure"
 	| "proposal_limit"
+	| "full_budget_exhausted"
 	| "user_finished";
 export interface ExperimentRow {
 	id: string;
 	status: "evaluated" | "cache_hit" | "failed" | "screening" | "pruned";
 	rationale: string;
 	evidence?: string;
+	evidence_refs?: string[];
 	staged?: {
 		candidate: Candidate;
 		smoke?: StageResult;
@@ -71,6 +76,7 @@ export interface TaskSummary {
 	failure_category?: FailureCategory;
 	revisions_used?: number;
 	fidelity?: FidelitySummary;
+	pareto?: ParetoSummary;
 	ended_at?: number;
 	compute_reserved_seconds: number;
 	unconfirmed_training_steps: number;
@@ -83,6 +89,11 @@ export interface TaskSummary {
 	};
 	budget: ReturnType<TaskBudget["snapshot"]>;
 	final_test_used: false;
+}
+interface ParetoSummary {
+	frontier: ParetoPoint[];
+	history: { evaluated: string; added: string[]; removed: string[]; frontier: string[] }[];
+	decision?: ParetoDecision;
 }
 interface FidelitySummary {
 	proposals: number;
@@ -175,6 +186,9 @@ export class TaskController {
 	private best?: RunResult;
 	private rows: ExperimentRow[] = [];
 	private cache = new Map<string, RunResult>();
+	private frontier: ParetoPoint[] = [];
+	private paretoHistory: ParetoSummary["history"] = [];
+	private paretoDecision?: ParetoDecision;
 	private attempted = new Set<string>();
 	private delivered = false;
 	private delivery?: ArtifactManifest;
@@ -225,6 +239,7 @@ export class TaskController {
 		const executor = await domain.open({ repo, root, python, budget });
 		if (spec.fidelity && (!durable || !executor.fidelity))
 			throw new Error("Fidelity tasks require a durable stage adapter");
+		if (spec.delivery_preference && !executor.paretoDelivery) throw new Error("Missing Pareto delivery adapter");
 		const task = new TaskController(root, spec, budget, executor, onStop);
 		const ledger = await durable?.open(root);
 		try {
@@ -307,11 +322,13 @@ export class TaskController {
 			task.delivered = saved.delivered;
 			for (const run of saved.evaluated) {
 				await executor.verifyEvaluated(run);
-				task.cache.set(run.fingerprint, run);
+				task.recordEvaluation(run);
 				if (run.id === "baseline") task.baseline = run;
 				task.best = chooseBest(task.best, run, executor.evaluation);
 			}
-			if (task.delivery && task.best) await executor.verifyDelivery(task.best, task.delivery);
+			if (spec.delivery_preference) {
+				await task.restorePareto(saved.summary.pareto);
+			} else if (task.delivery && task.best) await executor.verifyDelivery(task.best, task.delivery);
 			// 授权前的意图可证明没有执行。旧版 pending 没有握手证据，始终按未知处理。
 			task.commands = saved.commands.map((op): WorkerOperation => {
 				if (op.status === "intent") {
@@ -554,7 +571,13 @@ export class TaskController {
 			if (this.stopped) throw new Error(`Task stopped: ${this.reason}; no more experiments`);
 			const keys =
 				name === "candidate"
-					? ["content", "rationale", "parameters", ...(this.spec.fidelity ? ["evidence"] : [])]
+					? [
+							"content",
+							"rationale",
+							"parameters",
+							...(this.spec.fidelity ? ["evidence"] : []),
+							...(this.spec.delivery_preference ? ["evidence_refs"] : []),
+						]
 					: [];
 			// 工具入口不给任意配置、权限或评估协议覆盖的机会。
 			if (Object.keys(input).some((key) => !keys.includes(key)))
@@ -661,7 +684,7 @@ export class TaskController {
 			: await this.runPrepared(prepared, "baseline", signal);
 		this.baseline = chooseBest(undefined, evaluated, this.executor.evaluation);
 		this.best = this.baseline;
-		this.cache.set(evaluated.fingerprint, evaluated);
+		this.recordEvaluation(evaluated);
 		this.pendingRun = undefined;
 		this.event("baseline_evaluated", evaluated);
 	}
@@ -679,11 +702,21 @@ export class TaskController {
 		if (this.spec.fidelity) this.budget.experiments++;
 		this.pendingRun = row.id;
 		try {
-			const { content, rationale, parameters, evidence } = validateProposal(input);
+			const { content, rationale, parameters, evidence, evidence_refs } = validateProposal(input);
 			row.rationale = rationale;
 			row.evidence = evidence;
 			if (this.spec.fidelity && !evidence?.trim())
-				throw new ExperimentFailure("invalid_candidate", "A v3 candidate must cite supporting evidence");
+				throw new ExperimentFailure("invalid_candidate", "A staged candidate must cite supporting evidence");
+			// 提案只能引用已存在的实验，拒绝未来 ID、自引用与空引用。
+			if (
+				this.spec.delivery_preference &&
+				(!evidence_refs ||
+					evidence_refs.some(
+						(id) => id !== this.baseline?.id && !this.rows.slice(0, -1).some((previous) => previous.id === id),
+					))
+			)
+				throw new ExperimentFailure("invalid_candidate", "Evidence references must identify prior experiments");
+			row.evidence_refs = evidence_refs;
 			await this.commitLedger();
 			const prepared = await this.executor.prepare(row.id, content, rationale, signal, parameters);
 			row.fingerprint = prepared.fingerprint;
@@ -735,7 +768,7 @@ export class TaskController {
 			row.validation = result.validation;
 			row.run = result.run;
 			row.best_id = this.best.id;
-			this.cache.set(result.fingerprint, result);
+			if (!existing) this.recordEvaluation(result);
 			this.pendingRun = undefined;
 			this.failure = undefined;
 			this.failureCategory = undefined;
@@ -785,9 +818,9 @@ export class TaskController {
 		}
 		const full = await this.executeStage(adapter, work.candidate, "full", "candidate", signal);
 		const { result } = full;
+		this.recordEvaluation(result);
 		this.best = chooseBest(this.best, result, this.executor.evaluation);
 		work.full = full;
-		this.cache.set(result.fingerprint, result);
 		row.validation = result.validation;
 		row.run = result.run;
 		this.completeStaged(row, "evaluated");
@@ -800,6 +833,58 @@ export class TaskController {
 		this.failure = undefined;
 		this.failureCategory = undefined;
 		this.event(status, row);
+	}
+
+	// 全部独立评估按提交顺序重建变更轨迹，去重命中不产生新的正式候选。
+	private recordEvaluation(run: RunResult): void {
+		if (this.spec.delivery_preference) {
+			const protocol = this.executor.evaluation;
+			const point = paretoPoint(run, protocol);
+			const oldIds = this.frontier.map((entry) => entry.id);
+			this.frontier = paretoFrontier([...this.frontier, point], protocol.objectives);
+			const frontier = this.frontier.map((entry) => entry.id);
+			this.paretoHistory.push({
+				evaluated: run.id,
+				frontier,
+				added: frontier.filter((id) => !oldIds.includes(id)),
+				removed: oldIds.filter((id) => !frontier.includes(id)),
+			});
+		}
+		this.cache.set(run.fingerprint, run);
+	}
+
+	private selectedRuns(decision: ParetoDecision): RunResult[] {
+		return decision.selected.map((point) => {
+			const run = this.cache.get(point.fingerprint);
+			if (!run || run.id !== point.id)
+				throw new ExperimentFailure("evidence_integrity", "Missing evaluated Pareto member");
+			return run;
+		});
+	}
+
+	private async restorePareto(saved: ParetoSummary | undefined): Promise<void> {
+		const preference = this.spec.delivery_preference;
+		const adapter = this.executor.paretoDelivery;
+		if (!preference || !adapter || !saved)
+			throw new ExperimentFailure("evidence_integrity", "Missing Pareto checkpoint");
+		if (saved.decision)
+			this.paretoDecision = chooseParetoDelivery(this.frontier, this.executor.evaluation.objectives, preference);
+		if (JSON.stringify(this.paretoSummary()) !== JSON.stringify(saved))
+			throw new ExperimentFailure(
+				"evidence_integrity",
+				"Pareto checkpoint differs from independently evaluated history",
+			);
+		if (this.delivery) {
+			if (!this.paretoDecision?.primary)
+				throw new ExperimentFailure("evidence_integrity", "Missing approved delivery decision");
+			await adapter.verify(this.paretoDecision, this.selectedRuns(this.paretoDecision), this.delivery);
+		}
+	}
+
+	private paretoSummary(): ParetoSummary | undefined {
+		return this.spec.delivery_preference
+			? { frontier: this.frontier, history: this.paretoHistory, decision: this.paretoDecision }
+			: undefined;
 	}
 
 	private async executeStage(
@@ -848,6 +933,12 @@ export class TaskController {
 			}
 		}
 		if (this.budget.experiments >= this.spec.budget.max_experiments) this.requestStop("experiment_budget_exhausted");
+		else if (
+			this.spec.delivery_preference &&
+			this.spec.fidelity &&
+			this.candidateFullStarts() >= this.spec.fidelity.max_full
+		)
+			this.requestStop("full_budget_exhausted");
 		else this.budget.check();
 	}
 
@@ -893,6 +984,7 @@ export class TaskController {
 			failure_category: this.failureCategory,
 			revisions_used: this.spec.max_revisions === undefined ? undefined : this.revisionsUsed,
 			fidelity: this.fidelitySummary(),
+			pareto: this.paretoSummary(),
 			delivery: this.delivery,
 			ended_at: this.endedAt,
 			budget,
@@ -920,7 +1012,9 @@ export class TaskController {
 			const settled = started.filter((op) => "elapsedMs" in op);
 			return {
 				starts: started.filter((op) => stage === "review" || op.reservation).length,
-				confirmed_worker_successes: settled.filter((op) => op.status === "completed" && (stage === "review" || op.reservation)).length,
+				confirmed_worker_successes: settled.filter(
+					(op) => op.status === "completed" && (stage === "review" || op.reservation),
+				).length,
 				committed_training_steps: settled.reduce((total, op) => total + (op.reservation?.steps ?? 0), 0),
 				unconfirmed_training_steps: commands
 					.filter((op) => op.status !== "not_started" && !("elapsedMs" in op))
@@ -949,13 +1043,26 @@ export class TaskController {
 
 	private async finalize(): Promise<void> {
 		if (!this.delivered) {
+			const preference = this.spec.delivery_preference;
+			if (preference)
+				this.paretoDecision ??= chooseParetoDelivery(
+					this.frontier,
+					this.executor.evaluation.objectives,
+					preference,
+				);
+			const primary = preference ? this.paretoDecision?.primary : this.best?.id;
 			// Do not start training/evaluation or model calls after stopping. Verify and copy prior evidence.
-			if (this.best) {
+			if (primary) {
 				this.deliveryStarted = true;
 				await this.commitLedger();
 				try {
-					this.delivery = await this.executor.deliver(this.best);
-					if (this.delivery.best_id !== this.best.id) {
+					if (this.paretoDecision && this.executor.paretoDelivery)
+						this.delivery = await this.executor.paretoDelivery.publish(
+							this.paretoDecision,
+							this.selectedRuns(this.paretoDecision),
+						);
+					else if (this.best) this.delivery = await this.executor.deliver(this.best);
+					if (this.delivery?.best_id !== primary) {
 						this.delivery = undefined;
 						throw new ExperimentFailure("evidence_integrity", "Delivery manifest references a different run");
 					}

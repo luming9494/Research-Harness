@@ -101,7 +101,39 @@ const staged = Type.Object(
 	{ additionalProperties: false },
 );
 
-export type TaskSpec = ExperimentTaskSpec & (Static<typeof legacy> | Static<typeof current> | Static<typeof staged>);
+// 未校准的准确率代理可能错剪小模型，v4 只审批直接 Full 评估。
+const multiObjective = Type.Object(
+	{
+		...staged.properties,
+		version: Type.Literal(4),
+		objectives: Type.Union([
+			Type.Tuple([Type.Literal("accuracy"), Type.Literal("parameters")]),
+			Type.Tuple([Type.Literal("accuracy"), Type.Literal("parameters"), Type.Literal("loss")]),
+		]),
+		objective: Type.Optional(Type.Never()),
+		fidelity: Type.Object(
+			{
+				strategy: Type.Literal("full_only"),
+				max_full: staged.properties.fidelity.properties.max_full,
+			},
+			{ additionalProperties: false },
+		),
+		delivery_preference: Type.Union([
+			Type.Object(
+				{ strategy: Type.Union([Type.Literal("quality"), Type.Literal("lightweight"), Type.Literal("frontier")]) },
+				{ additionalProperties: false },
+			),
+			Type.Object(
+				{ strategy: Type.Literal("minimum_accuracy"), minimum_accuracy: Type.Number({ minimum: 0, maximum: 1 }) },
+				{ additionalProperties: false },
+			),
+		]),
+	},
+	{ additionalProperties: false },
+);
+
+export type TaskSpec = ExperimentTaskSpec &
+	(Static<typeof legacy> | Static<typeof current> | Static<typeof staged> | Static<typeof multiObjective>);
 export const parameterProposalSchema = Type.Object(
 	{ learning_rate: Type.Optional(learningRate) },
 	{ additionalProperties: false },
@@ -109,13 +141,16 @@ export const parameterProposalSchema = Type.Object(
 
 export function validateTaskSpec(value: unknown): TaskSpec {
 	if (Check(legacy, value)) return structuredClone(value);
-	if (!Check(current, value) && !Check(staged, value))
+	if (!Check(current, value) && !Check(staged, value) && !Check(multiObjective, value))
 		throw new Error("Invalid Tiny TaskSpec: expected exact fields and bounded values; cannot relax trusted policy");
 	const range = value.parameters?.learning_rate;
 	if (
-		value.version === 3 &&
+		value.version >= 3 &&
+		"fidelity" in value &&
 		(value.fidelity.max_full > value.budget.max_experiments ||
-			(value.fidelity.strategy === "full_only" && value.fidelity.max_full !== value.budget.max_experiments))
+			(value.version === 3 &&
+				value.fidelity.strategy === "full_only" &&
+				value.fidelity.max_full !== value.budget.max_experiments))
 	)
 		throw new Error("Invalid full training budget for fidelity strategy");
 	if (range && range.min > range.max) throw new Error("Invalid approved learning_rate range");

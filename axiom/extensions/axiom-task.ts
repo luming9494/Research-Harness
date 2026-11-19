@@ -1,5 +1,5 @@
 // Bridges WP-04 domain tools and budget accounting into the existing native Pi session.
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { BudgetStop } from "../../packages/coding-agent/src/axiom/execution/task-budget.ts";
 import { TaskController } from "../../packages/coding-agent/src/axiom/execution/task-controller.ts";
 import { DEFAULT_BUDGET, TASK_RULES, validateTaskSpec } from "../../packages/coding-agent/src/axiom/execution/task-spec.ts";
+import { openExperimentLedger } from "../durable/experiment-ledger.ts";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 const empty = Type.Object({}, { additionalProperties: false });
@@ -26,10 +27,11 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
   let registered = false;
   const close = async () => {
     if (!active || !task) return;
-    if (task.budget.pendingUsage) task.budget.settleTokens(undefined);
+    task.markUsageUnknown();
     await task.stop("user_cancelled");
     pi.setActiveTools(prior);
     active = false;
+    await task.closeLedger();
   };
   pi.on("session_shutdown", close);
   pi.on("tool_call", event => {
@@ -52,10 +54,15 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
     if (!active || !task) return;
     if (task.stopped) { ctx.abort(); return; }
     try {
+      // 网络层自动重试不经过新的上下文事件，因此任务模式要求显式关闭。
+      if (pi.getSettings().retry?.provider?.maxRetries !== 0) {
+        ctx.ui.notify("Set retry.provider.maxRetries to 0 in Pi settings before sending an AXIOM task prompt.", "error");
+        ctx.abort();
+        return;
+      }
       // Native full transcript includes active tool schemas. This is admission headroom, not an output cap.
       const estimate = Buffer.byteLength(JSON.stringify(event.messages), "utf8") + 8192 + 2048;
-      task.budget.reserveTokens(estimate);
-      await task.checkpoint();
+      await task.reserveRequest(estimate);
     } catch (error) {
       ctx.abort();
       await task.stop(error instanceof BudgetStop ? error.reason : "execution_failure");
@@ -69,22 +76,20 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
   pi.on("agent_settled", async event => {
     if (!active || !task) return;
     const pending = task.budget.pendingUsage;
-    if (pending) task.budget.settleTokens(undefined);
+    if (pending) task.markUsageUnknown();
     if (!task.stopped && (event.aborted || pending)) await task.stop(event.aborted ? "user_cancelled" : "token_usage_uncertain");
     await task.checkpoint();
   });
 
-  pi.registerCommand("axiom-task", {
-    description: "Start an approved multi-round Tiny Task; optional argument is a full TaskSpec JSON",
-    handler: async (args, ctx) => {
-      await ctx.waitForIdle();
-      if (active || tinyActive()) { ctx.ui.notify("Stop the current AXIOM mode before starting another task.", "warning"); return; }
-      if (!ctx.hasUI) throw new Error("Task requires interactive approval");
-      const spec = validateTaskSpec(args.trim() ? JSON.parse(args) as unknown : { version: 1, task: "tiny-xor-v1", goal: "Improve Tiny XOR validation accuracy within approved budgets", target_accuracy: null, rules: TASK_RULES, budget: DEFAULT_BUDGET });
-      if (!await ctx.ui.confirm("AXIOM multi-round Tiny Task", `${JSON.stringify(spec, null, 2)}\nAllow local CPU experiments? Chat uses the selected Pi model and may incur fees. Token admission is estimated, not an absolute provider billing cap.`)) return;
-      const python = process.env.AXIOM_PYTHON || join(repo, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
-      if (!existsSync(python)) throw new Error("Create .venv or set AXIOM_PYTHON to a trusted executable");
-      task = await TaskController.create(repo, python, spec, () => ctx.abort());
+  // 新建与恢复共用工具注册和权限设置；终态恢复仅报告证据并释放所有权。
+  const activate = async (controller: TaskController, ctx: ExtensionCommandContext): Promise<void> => {
+      const status = controller.snapshot();
+      if (controller.stopped) {
+        await controller.closeLedger();
+        ctx.ui.notify(`Task ${status.task_id}: ${status.status} (${status.stop_reason}). Evidence: ${controller.root}`, "info");
+        return;
+      }
+      task = controller;
       if (!registered) {
         for (const tool of tools) pi.registerTool({
           name: `axiom_task_${tool.name}`, label: `AXIOM ${tool.name}`, description: tool.description,
@@ -107,6 +112,37 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
         throw new Error(`AXIOM task tools are disabled by the native tool selection. Use --no-builtin-tools instead of --no-tools, or allow all four axiom_task tools. Evidence: ${task.root}`);
       }
       ctx.ui.notify(`Task ready: ${task.root}. Ask Pi to inspect, run baseline and optimize. /axiom-task-stop restores tools.`, "info");
+  };
+
+  // 同一个解释器路径会参与可信输入身份校验，不能在恢复时换用其他解释器。
+  const pythonPath = (): string => {
+    const python = process.env.AXIOM_PYTHON || join(repo, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+    if (!existsSync(python)) throw new Error("Create .venv or set AXIOM_PYTHON to a trusted executable");
+    return python;
+  };
+
+  pi.registerCommand("axiom-task", {
+    description: "Start an approved multi-round Tiny Task; optional argument is a full TaskSpec JSON",
+    handler: async (args, ctx): Promise<void> => {
+      await ctx.waitForIdle();
+      if (active || tinyActive()) { ctx.ui.notify("Stop the current AXIOM mode before starting another task.", "warning"); return; }
+      if (!ctx.hasUI) throw new Error("Task requires interactive approval");
+      const spec = validateTaskSpec(args.trim() ? JSON.parse(args) as unknown : { version: 1, task: "tiny-xor-v1", goal: "Improve Tiny XOR validation accuracy within approved budgets", target_accuracy: null, rules: TASK_RULES, budget: DEFAULT_BUDGET });
+      if (!await ctx.ui.confirm("AXIOM multi-round Tiny Task", `${JSON.stringify(spec, null, 2)}\nAllow local CPU experiments? Chat uses the selected Pi model and may incur fees. Token admission is estimated, not an absolute provider billing cap.`)) return;
+      const controller = await TaskController.create(repo, pythonPath(), spec, () => ctx.abort(), {
+        open: openExperimentLedger,
+        approval: { approvedAt: new Date().toISOString(), sessionId: ctx.sessionManager.getSessionId() },
+      });
+      await activate(controller, ctx);
+    },
+  });
+  pi.registerCommand("axiom-task-resume", {
+    description: "Resume a Tiny Task by its original workspace ID and budget",
+    handler: async (args, ctx): Promise<void> => {
+      await ctx.waitForIdle();
+      if (active || tinyActive()) { ctx.ui.notify("Stop the current AXIOM mode before resuming another task.", "warning"); return; }
+      // 原审批随账本恢复；本命令本身不会发模型请求。
+      await activate(await TaskController.resume(repo, pythonPath(), args.trim(), openExperimentLedger, () => ctx.abort()), ctx);
     },
   });
   pi.registerCommand("axiom-task-stop", {

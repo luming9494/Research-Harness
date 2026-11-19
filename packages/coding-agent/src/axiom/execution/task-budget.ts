@@ -28,10 +28,24 @@ export class TaskBudget {
 	requests = 0;
 	uncertain = false;
 	private held = 0;
-	constructor(spec: TaskSpec, now: () => number = () => performance.now()) {
+	constructor(spec: TaskSpec, now: () => number = () => performance.now(), started = now()) {
 		this.spec = spec;
 		this.now = now;
-		this.started = now();
+		this.started = started;
+	}
+	// 将原截止时间和上次观测的剩余额度同时纳入恢复，系统时钟回拨也不会返还预算。
+	static restore(spec: TaskSpec, deadline: number, saved: ReturnType<TaskBudget["snapshot"]>): TaskBudget {
+		const remaining = Math.min(spec.budget.wall_seconds * 1000 - saved.wall_seconds * 1000, deadline - Date.now());
+		const start = performance.now() - (spec.budget.wall_seconds * 1000 - remaining);
+		const budget = new TaskBudget(spec, () => performance.now(), start);
+		budget.experiments = saved.experiments;
+		budget.trainingSteps = saved.training_steps_reserved;
+		budget.computeMs = saved.compute_process_seconds * 1000;
+		budget.tokens = saved.tokens_actual;
+		budget.requests = saved.model_requests;
+		budget.held = saved.tokens_admission_estimate;
+		budget.uncertain = saved.usage_uncertain;
+		return budget;
 	}
 	get remainingWallMs(): number {
 		return this.spec.budget.wall_seconds * 1000 - (this.now() - this.started);
@@ -70,18 +84,20 @@ export class TaskBudget {
 		this.held = estimate;
 		this.requests++;
 	}
-	settleTokens(actual: number | undefined): void {
-		if (!this.held) return;
+	settleTokens(actual: number | undefined, certainty: "final" | "partial" = "final"): void {
+		if (!this.pendingUsage) return;
 		// Usage is provider/event input, not inferred from tool counts or model text.
 		if (actual === undefined || !Number.isSafeInteger(actual) || actual < 0) {
 			this.uncertain = true;
 		} else {
 			this.tokens += actual;
+			this.uncertain = certainty === "partial";
 		}
-		this.held = 0;
+		// 用量不明时持续保留预留，恢复后也禁止将其用作新请求额度。
+		if (!this.uncertain) this.held = 0;
 	}
 	get pendingUsage(): boolean {
-		return this.held > 0;
+		return this.held > 0 && !this.uncertain;
 	}
 	snapshot() {
 		return {

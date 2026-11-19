@@ -125,7 +125,8 @@ test("real compiled CLI starts offline through the isolated launcher and exposes
   const response = result.stdout.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)).find(line => line.id === "commands");
   assert.equal(response?.success, true, result.stdout);
   const extensions = response.data.commands.filter(command => command.source === "extension");
-  assert.deepEqual(extensions.map(command => command.name).sort(), ["axiom-stop", "axiom-task", "axiom-task-stop", "axiom-tiny"]);
+  // 新的恢复入口同样由显式加载的 AXIOM 扩展提供。
+  assert.deepEqual(extensions.map(command => command.name).sort(), ["axiom-stop", "axiom-task", "axiom-task-resume", "axiom-task-stop", "axiom-tiny"]);
   const env = { ...process.env, LOCALAPPDATA: localAppData, PI_OFFLINE: "1" };
   const logout = spawnSync(process.execPath, [launcher, "auth", "logout", "deepseek"], { env, encoding: "utf8", timeout: 30000 });
   assert.equal(logout.status, 0, logout.stderr);

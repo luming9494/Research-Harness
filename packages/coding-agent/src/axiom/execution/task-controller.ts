@@ -1,9 +1,15 @@
 // Controls serialized multi-round Tiny experiments independently of Pi conversation/session state.
 import { appendFileSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rename, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 import { type BudgetReason, BudgetStop, TaskBudget } from "./task-budget.ts";
-import { CpuTaskExecutor, type Evaluated, type TaskExecutor } from "./task-executor.ts";
+import {
+	CpuTaskExecutor,
+	type Evaluated,
+	type ExecutorCheckpoint,
+	type TaskExecutor,
+	type WorkerOperation,
+} from "./task-executor.ts";
 import { REVIEW_NOTES, type TaskSpec, validateTaskSpec } from "./task-spec.ts";
 
 export type StopReason =
@@ -11,6 +17,7 @@ export type StopReason =
 	| "validation_target_reached"
 	| "user_cancelled"
 	| "execution_failure"
+	| "operation_unconfirmed"
 	| "delivery_integrity_failure"
 	| "proposal_limit"
 	| "user_finished";
@@ -26,13 +33,57 @@ export interface ExperimentRow {
 	error?: string;
 }
 export interface TaskSummary {
-	status: "running" | "target_reached" | "budget_exhausted" | "cancelled" | "failed" | "completed";
+	status:
+		| "running"
+		| "target_reached"
+		| "budget_exhausted"
+		| "cancelled"
+		| "failed"
+		| "completed"
+		| "needs_reconciliation";
 	stop_reason?: StopReason;
 	failure?: string;
 	delivery?: Record<string, unknown>;
 	budget: ReturnType<TaskBudget["snapshot"]>;
 	final_test_used: false;
 }
+
+// 领域账本由 Durable 适配器实现，控制器持有的内存状态只服务当前所有者。
+export interface TaskLedger {
+	load(): Promise<TaskCheckpoint | undefined>;
+	save(state: TaskCheckpoint): Promise<void>;
+	close(): Promise<void>;
+}
+export type OpenTaskLedger = (directory: string) => Promise<TaskLedger>;
+export interface TaskApproval {
+	approvedAt: string;
+	sessionId: string;
+}
+export interface TaskCheckpoint {
+	taskId: string;
+	spec: TaskSpec;
+	approval: TaskApproval;
+	deadline: number;
+	summary: TaskSummary;
+	rows: ExperimentRow[];
+	evaluated: Evaluated[];
+	executor: ExecutorCheckpoint;
+	commands: WorkerOperation[];
+	requests: ModelOperation[];
+	pendingRun?: string;
+	deliveryStarted: boolean;
+	delivered: boolean;
+}
+type ModelUsage = {
+	provider: string;
+	model: string;
+	stop_reason: string;
+	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number };
+};
+type ModelOperation = { id: number; estimate: number } & (
+	| { status: "pending" }
+	| { status: "completed" | "unknown"; evidence?: ModelUsage }
+);
 
 // Migrated selection rule: independent full validation only, strict improvement, ties retain history.
 export function chooseBest(current: Evaluated | undefined, candidate: Evaluated): Evaluated {
@@ -70,6 +121,11 @@ export class TaskController {
 	private cache = new Map<string, Evaluated>();
 	private delivered = false;
 	private delivery?: Record<string, unknown>;
+	private persistence?: { ledger: TaskLedger; executor: CpuTaskExecutor; approval: TaskApproval; deadline: number };
+	private commands: WorkerOperation[] = [];
+	private requests: ModelOperation[] = [];
+	private pendingRun?: string;
+	private deliveryStarted = false;
 
 	constructor(
 		root: string,
@@ -85,26 +141,128 @@ export class TaskController {
 		this.onStop = onStop;
 	}
 
-	static async create(repo: string, python: string, input: unknown, onStop: () => void): Promise<TaskController> {
+	static async create(
+		repo: string,
+		python: string,
+		input: unknown,
+		onStop: () => void,
+		durable?: { open: OpenTaskLedger; approval: TaskApproval },
+	): Promise<TaskController> {
 		const spec = validateTaskSpec(input);
 		repo = await realpath(repo);
 		python = await realpath(python);
-		const parent = join(repo, "private");
-		await mkdir(parent, { recursive: true });
-		const offset = relative(repo, await realpath(parent));
-		if (offset.startsWith("..") || isAbsolute(offset)) throw new Error("private must remain inside repository");
+		const parent = await TaskController.taskDirectory(repo);
 		const root = await mkdtemp(join(parent, "wp04-"));
 		const budget = new TaskBudget(spec);
 		const executor = new CpuTaskExecutor(repo, root, python, budget);
 		await executor.initialize();
 		const task = new TaskController(root, spec, budget, executor, onStop);
-		await task.initialize();
+		const ledger = await durable?.open(root);
+		try {
+			if (ledger && durable) task.attach(ledger, executor, durable.approval, Date.now() + budget.remainingWallMs);
+			await task.initialize();
+		} catch (error) {
+			await ledger?.close();
+			throw error;
+		}
 		return task;
+	}
+
+	// 恢复只接受仓库私有目录中已创建的任务 ID，持锁后再读取权威状态和证据。
+	static async resume(
+		repo: string,
+		python: string,
+		id: string,
+		open: OpenTaskLedger,
+		onStop: () => void,
+	): Promise<TaskController> {
+		if (!/^wp04-[A-Za-z0-9]{6}$/.test(id)) throw new Error("Invalid AXIOM task ID");
+		repo = await realpath(repo);
+		const parent = await TaskController.taskDirectory(repo);
+		const root = await realpath(join(parent, id));
+		if (relative(parent, root) !== id) throw new Error("Task directory must not be redirected");
+		const ledger = await open(root);
+		try {
+			const saved = await ledger.load();
+			if (!saved || saved.taskId !== id) throw new Error("No durable experiment ledger for this task");
+			const spec = validateTaskSpec(saved.spec);
+			const budget = TaskBudget.restore(spec, saved.deadline, saved.summary.budget);
+			const executor = new CpuTaskExecutor(repo, root, await realpath(python), budget);
+			await executor.initialize(saved.executor, saved.commands.length);
+			for (const command of saved.commands)
+				if (command.status === "completed") await executor.verifyCommand(command);
+			const task = new TaskController(root, spec, budget, executor, onStop);
+			task.attach(ledger, executor, saved.approval, saved.deadline);
+			task.commands = saved.commands;
+			task.requests = saved.requests;
+			task.rows = saved.rows;
+			task.failure = saved.summary.failure;
+			task.reason = saved.summary.stop_reason;
+			task.delivery = saved.summary.delivery;
+			task.pendingRun = saved.pendingRun;
+			task.deliveryStarted = saved.deliveryStarted;
+			task.delivered = saved.delivered;
+			for (const run of saved.evaluated) {
+				await executor.verifyEvaluated(run);
+				task.cache.set(run.fingerprint, run);
+				if (run.id === "baseline") task.baseline = run;
+				task.best = chooseBest(task.best, run);
+			}
+			if (task.delivery && task.best) await executor.verifyDelivery(task.best, task.delivery);
+			// 已登记但未结算的操作不重放；即使有临时产物也不能认作成功。
+			const interrupted =
+				task.pendingRun || task.commands.some((op) => op.status === "pending") || budget.pendingUsage;
+			if (budget.pendingUsage) task.markUsageUnknown();
+			if (task.deliveryStarted && !task.delivered) {
+				task.reason = "operation_unconfirmed";
+				task.failure = "Previous delivery was interrupted; existing outputs need reconciliation";
+				task.delivered = true;
+			} else if (interrupted) {
+				task.reason = "operation_unconfirmed";
+				task.failure = "An external operation was not confirmed; its reservation was retained";
+			}
+			try {
+				task.checkStopConditions();
+			} catch (error) {
+				if (!(error instanceof BudgetStop)) throw error;
+				task.requestStop(error.reason, "restore");
+			}
+			if (task.stopped) await task.finalize();
+			else {
+				await task.persist();
+				task.armDeadline();
+			}
+			return task;
+		} catch (error) {
+			await ledger.close();
+			throw error;
+		}
+	}
+
+	private static async taskDirectory(repo: string): Promise<string> {
+		const parent = join(repo, "private");
+		await mkdir(parent, { recursive: true });
+		const resolved = await realpath(parent);
+		const offset = relative(repo, resolved);
+		if (offset !== "private" || isAbsolute(offset)) throw new Error("private must remain inside repository");
+		return resolved;
+	}
+
+	private attach(ledger: TaskLedger, executor: CpuTaskExecutor, approval: TaskApproval, deadline: number): void {
+		this.persistence = { ledger, executor, approval, deadline };
+		executor.recordCommand = async (operation): Promise<void> => {
+			this.commands[operation.id - 1] = operation;
+			await this.commitLedger();
+		};
 	}
 
 	async initialize(): Promise<void> {
 		await writeFile(join(this.root, "task-spec.json"), JSON.stringify(this.spec, null, 2), { flag: "wx" });
 		await this.persist();
+		this.armDeadline();
+	}
+
+	private armDeadline(): void {
 		this.timer = setTimeout(
 			() => {
 				void this.stop("wall_budget_exhausted").catch((error) => {
@@ -122,6 +280,8 @@ export class TaskController {
 	snapshot() {
 		return structuredClone({
 			workspace: this.root,
+			task_id: basename(this.root),
+			deadline: this.persistence?.deadline,
 			task: this.spec,
 			model: this.executor.original,
 			config: this.executor.config,
@@ -145,17 +305,44 @@ export class TaskController {
 		return this.enqueue(() => this.persist());
 	}
 
+	// 在请求发送前原子记录用量预留；结算未知时保留原记录。
+	reserveRequest(estimate: number): Promise<void> {
+		return this.enqueue(async () => {
+			if (this.stopped) throw new Error("Task stopped");
+			this.budget.reserveTokens(estimate);
+			this.requests.push({ id: this.budget.requests, estimate, status: "pending" });
+			await this.commitLedger();
+		});
+	}
+
+	markUsageUnknown(): void {
+		if (!this.budget.pendingUsage) return;
+		this.budget.settleTokens(undefined);
+		const op = this.requests.at(-1);
+		if (op?.status === "pending") this.requests[this.requests.length - 1] = { ...op, status: "unknown" };
+	}
+
+	// 结束或释放当前控制器后等待所有已入队写入，再释放 SQLite 的所有权。
+	async closeLedger(): Promise<void> {
+		clearTimeout(this.timer);
+		await this.serial;
+		await this.persistence?.ledger.close();
+	}
+
 	// Native Pi usage is the accounting input; tool counts and admission estimates are never actual tokens.
-	async recordUsage(evidence: {
-		provider: string;
-		model: string;
-		stop_reason: string;
-		usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number };
-	}): Promise<void> {
+	async recordUsage(evidence: ModelUsage): Promise<void> {
 		const admission = this.budget.snapshot().tokens_admission_estimate;
-		this.budget.settleTokens(evidence.usage.totalTokens);
-		// Preserve any reported partial usage, but do not assume an interrupted request was fully billed yet.
-		if (evidence.stop_reason === "error" || evidence.stop_reason === "aborted") this.budget.uncertain = true;
+		this.budget.settleTokens(
+			evidence.usage.totalTokens,
+			evidence.stop_reason === "error" || evidence.stop_reason === "aborted" ? "partial" : "final",
+		);
+		const op = this.requests.at(-1);
+		if (op?.status === "pending")
+			this.requests[this.requests.length - 1] = {
+				...op,
+				evidence,
+				status: this.budget.uncertain ? "unknown" : "completed",
+			};
 		this.event("native_pi_usage", {
 			source: "Pi message_end",
 			request: this.budget.requests,
@@ -201,6 +388,8 @@ export class TaskController {
 				}
 				this.checkStopConditions();
 			} catch (error) {
+				// 已退出并已结算的失败保留终态；只给缺失完成凭证的进程保留待核对意图。
+				if (!this.commands.some((op) => op.status === "pending")) this.pendingRun = undefined;
 				this.failure = String(error);
 				this.requestStop(
 					error instanceof BudgetStop ? error.reason : signal?.aborted ? "user_cancelled" : "execution_failure",
@@ -222,6 +411,8 @@ export class TaskController {
 
 	private async runBaseline(signal: AbortSignal): Promise<void> {
 		if (this.baseline) return;
+		this.pendingRun = "baseline";
+		await this.commitLedger();
 		const prepared = await this.executor.prepare(
 			"baseline",
 			this.executor.original,
@@ -232,6 +423,7 @@ export class TaskController {
 		this.baseline = chooseBest(undefined, evaluated);
 		this.best = this.baseline;
 		this.cache.set(evaluated.fingerprint, evaluated);
+		this.pendingRun = undefined;
 		this.event("baseline_evaluated", evaluated);
 	}
 
@@ -244,7 +436,9 @@ export class TaskController {
 		}
 		const row: ExperimentRow = { id: `exp-${this.rows.length + 1}`, status: "failed", rationale };
 		this.rows.push(row);
+		this.pendingRun = row.id;
 		try {
+			await this.commitLedger();
 			const prepared = await this.executor.prepare(row.id, content, rationale, signal);
 			row.fingerprint = prepared.fingerprint;
 			const existing = this.cache.get(prepared.fingerprint);
@@ -256,6 +450,7 @@ export class TaskController {
 			row.run = result.run;
 			row.best_id = this.best.id;
 			this.cache.set(result.fingerprint, result);
+			this.pendingRun = undefined;
 			this.event(row.status, row);
 		} catch (error) {
 			row.error = String(error);
@@ -274,12 +469,12 @@ export class TaskController {
 		else this.budget.check();
 	}
 
-	private requestStop(reason: StopReason): void {
+	private requestStop(reason: StopReason, origin: "active" | "restore" = "active"): void {
 		if (this.stopped) return;
 		this.reason = reason;
 		clearTimeout(this.timer);
 		this.cancellation.abort(new Error(reason));
-		this.onStop();
+		if (origin === "active") this.onStop();
 	}
 
 	private summary(): TaskSummary {
@@ -289,13 +484,15 @@ export class TaskController {
 				? "running"
 				: reason === "validation_target_reached"
 					? "target_reached"
-					: reason === "user_cancelled"
-						? "cancelled"
-						: reason.includes("budget") || reason === "token_usage_uncertain"
-							? "budget_exhausted"
-							: reason.includes("failure")
-								? "failed"
-								: "completed",
+					: reason === "operation_unconfirmed"
+						? "needs_reconciliation"
+						: reason === "user_cancelled"
+							? "cancelled"
+							: reason.includes("budget") || reason === "token_usage_uncertain"
+								? "budget_exhausted"
+								: reason.includes("failure")
+									? "failed"
+									: "completed",
 			stop_reason: reason,
 			failure: this.failure,
 			delivery: this.delivery,
@@ -306,9 +503,10 @@ export class TaskController {
 
 	private async finalize(): Promise<void> {
 		if (!this.delivered) {
-			this.delivered = true;
 			// Do not start training/evaluation or model calls after stopping. Verify and copy prior evidence.
 			if (this.best) {
+				this.deliveryStarted = true;
+				await this.commitLedger();
 				try {
 					this.delivery = await this.executor.deliver(this.best);
 				} catch (error) {
@@ -316,12 +514,14 @@ export class TaskController {
 					this.failure = String(error);
 				}
 			}
+			this.delivered = true;
 			this.event("task_stopped", this.summary());
 		}
 		await this.persist();
 	}
 
 	private async persist(): Promise<void> {
+		await this.commitLedger();
 		const snapshot = this.snapshot();
 		for (const [name, value] of [
 			["experiments.json", snapshot],
@@ -356,6 +556,26 @@ export class TaskController {
 				...REVIEW_NOTES.map((note) => `- ${note}`),
 			].join("\n\n"),
 		);
+	}
+
+	private async commitLedger(): Promise<void> {
+		if (!this.persistence) return;
+		const { ledger, executor, approval, deadline } = this.persistence;
+		await ledger.save({
+			taskId: basename(this.root),
+			spec: this.spec,
+			approval,
+			deadline,
+			summary: this.summary(),
+			rows: this.rows,
+			evaluated: [...this.cache.values()],
+			executor: executor.checkpoint(),
+			commands: this.commands,
+			requests: this.requests,
+			pendingRun: this.pendingRun,
+			deliveryStarted: this.deliveryStarted,
+			delivered: this.delivered,
+		});
 	}
 
 	private event(type: string, detail: unknown): void {

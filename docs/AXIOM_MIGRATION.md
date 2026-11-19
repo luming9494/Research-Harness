@@ -88,7 +88,7 @@ npm run axiom -- --tui-mode regular
 
 ## 7. WP-05 与后续实现分工
 
-Pi Durable 提供持久任务、检查点和重启调度。AXIOM 在其上实现科研任务身份、单写者保护、预算预留和外部作业对账。Windows 上的真实进程测试已验证运行时单写者与强制终止后的任务恢复。当前测试通过模拟外部操作证明防重，实验账本、原生 CLI 恢复和 Slurm 作业接管仍需各自验收。[WP-05 运行时验证](AXIOM_WP05_RUNTIME.md)
+Pi Durable 提供持久任务、检查点和原子文档提交。WP-05.2 用其文档事务保存实验账本，AXIOM 负责科研任务身份、单写者、预算、恢复与产物核验。Windows 上已验证真实 Tiny CPU 跨进程恢复和原生 CLI 命令。旧任务目录若没有 SQLite 账本，仍可查看原记录。Slurm 作业接管单独验收。[WP-05 运行时验证](AXIOM_WP05_RUNTIME.md)
 
 后续的策略配置、独立发布评测、科研任务记忆和 Run Manifest 都在 AXIOM 领域层实现。通用模型调用、工具调度与上下文压缩沿用 Pi。
 

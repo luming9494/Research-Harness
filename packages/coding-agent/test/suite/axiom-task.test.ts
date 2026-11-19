@@ -1,11 +1,13 @@
 // Verifies WP-04 tools, native usage/admission and real CPU failure/cancellation without paid APIs.
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxToolCall, type JsonObject } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
+import { openExperimentLedger } from "../../../../axiom/durable/experiment-ledger.ts";
 import axiomTiny from "../../../../axiom/extensions/axiom-tiny.ts";
+import { TaskController } from "../../src/axiom/execution/task-controller.ts";
 import { DEFAULT_BUDGET, TASK_RULES } from "../../src/axiom/execution/task-spec.ts";
 import { parseArgs } from "../../src/cli/args.ts";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
@@ -34,7 +36,8 @@ async function start(approved = true, maxTokens = 500000) {
 	let api: ExtensionAPI | undefined;
 	const harness = await createHarness({
 		initialActiveToolNames: ["read"],
-		settings: { compaction: { enabled: false } },
+		// 网络层重试必须关闭，领域账本只准入已持久化的模型请求。
+		settings: { compaction: { enabled: false }, retry: { provider: { maxRetries: 0 } } },
 		extensionFactories: [
 			(pi) => {
 				api = pi;
@@ -84,11 +87,41 @@ async function summary(root: string) {
 }
 
 describe("AXIOM WP-04 native Pi extension", () => {
+	it.skipIf(!existsSync(python))(
+		"resumes an approved task through the native command and blocks unmetered provider retries",
+		async (): Promise<void> => {
+			// 模拟原会话已退出，使用同一个生产账本恢复到全新的原生 Pi 会话。
+			const task = await TaskController.create(repo, python, taskSpec(), () => {}, {
+				open: openExperimentLedger,
+				approval: { approvedAt: new Date().toISOString(), sessionId: "previous-session" },
+			});
+			await task.closeLedger();
+			const harness = await createHarness({
+				settings: { retry: { provider: { maxRetries: 1 } } },
+				extensionFactories: [axiomTiny],
+			});
+			cleanups.push(() => harness.cleanup());
+			cleanups.push(async (): Promise<void> => {
+				await harness.session.prompt("/axiom-task-stop");
+				await rm(task.root, { recursive: true, force: true });
+			});
+			await harness.session.bindExtensions({ uiContext: createTestUiContext() });
+			await harness.session.prompt(`/axiom-task-resume ${basename(task.root)}`);
+			expect((await inspectDirect(harness)).workspace).toBe(task.root);
+			expect(harness.faux.state.callCount).toBe(0);
+			harness.setResponses([fauxAssistantMessage("Unmetered request should not reach the provider")]);
+			await harness.session.prompt("Attempt to use automatic provider retries");
+			expect(harness.faux.state.callCount).toBe(0);
+			expect((await summary(task.root)).budget.model_requests).toBe(0);
+		},
+		30000,
+	);
+
 	it.skipIf(!existsSync(python)).each(["--no-tools", "--no-builtin-tools"])(
 		"checks actual SDK tool declarations after approval with %s",
 		async (flag) => {
 			const harness = await createHarness({
-				settings: { compaction: { enabled: false }, retry: { enabled: false } },
+				settings: { compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } },
 			});
 			cleanups.push(() => harness.cleanup());
 			const loader = new DefaultResourceLoader({

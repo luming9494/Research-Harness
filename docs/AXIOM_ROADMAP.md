@@ -15,7 +15,7 @@ AXIOM 是面向自主科研的自进化 Agent Harness。机器学习是首个场
 | WP-02 | 原生 Session/faux 工具注册、权限、Smoke、取消和工具恢复通过 | 保持原生工具回归 |
 | WP-03 | 人工候选的真实训练、独立验证、keep 与失败 revert 通过 | 不将人工候选验收称作模型自主优化 |
 | WP-04 | 可信 Tiny CPU 多轮内核已迁入，两阶段真实 LLM 主流程经原生 RPC 验收通过 | 补齐终端 TUI 人工验收，保留较差、平分和失败候选的离线回归 |
-| WP-05 | 已通过 Pi Durable 单写者和跨进程检查点验证。[运行时验证](AXIOM_WP05_RUNTIME.md) | 接入 Tiny CPU 实验账本及原生恢复入口，核对规则、预算与产物，保留历史最佳并防止重复执行 |
+| WP-05.2 | Tiny CPU 实验账本与原生恢复入口已接入，真实 CPU 跨进程恢复已验收。[恢复验证](AXIOM_WP05_RUNTIME.md) | 等待独立代码审阅。后续将现有恢复与防重用例纳入 AXIOM-Bench |
 | 后续 | 规划中 | 第二类 AI 任务、跨任务评测、Ablate、Reproduce 和远程 GPU Runner |
 
 ## 两个优化循环
@@ -37,9 +37,9 @@ AXIOM 是面向自主科研的自进化 Agent Harness。机器学习是首个场
 
 AXIOM-Bench 先用 faux provider 和真实 CPU 执行做确定性回归，再用隔离案例进行真实模型对照。归因至少区分模型、工具、上下文、预算、执行环境、评估器与未知。每条归因引用实际事件或产物。报告保留任务成功、恢复成功、重复启动、预算、越权拦截和独立复验的分子分母。多次运行时固定任务、模型、预算和环境，分别报告 `pass@k`（至少一次成功）与 `pass^k`（每次均成功）。候选生成只看开发轨迹，留出结果用于独立验收，避免多轮调参泄漏答案。[Trial by Trace](https://arxiv.org/abs/2610.32285) · [Agent Evals](https://www.anthropic.com/research/demystifying-evals-for-ai-agents) · [MLE-bench](https://github.com/openai/mle-bench) · [PaperBench](https://openai.com/index/paperbench/)
 
-## WP-05 首个实现切片
+## WP-05 设计与已验收范围
 
-**Pi Durable 负责会话、任务调度、检查点与重启调度。AXIOM 负责科研任务的业务事实。** 前者提供 SQLite 存储和工具重放声明，但文档明确同一存储由单一进程持有。后者定义实验身份、预算、可否重放以及训练、评估和交付如何对账。先用仓库已有 Pi Durable 做单机验证，确定领域状态存储方式和单写者约束。每项业务事实保留唯一权威来源，原 WP-04 JSON 报告继续用于展示与审计。[Pi Durable](../packages/durable/README.md)
+**Pi 提供会话、工具调度与持久化原语，AXIOM 负责科研任务的业务事实。** WP-05.2 使用 Pi Durable 的 SQLite 文档事务保存权威账本，并沿用本地单写者保护。恢复由原生 Pi 扩展显式触发，外部训练与模型请求不注册为 Durable 自动重放任务。WP-04 JSON 报告继续用于展示与审计。[Pi Durable](../packages/durable/README.md) · [WP-05.2 实现与验证](AXIOM_WP05_RUNTIME.md)
 
 1. **持久化执行边界**。为同一任务保留稳定任务 ID、原 TaskSpec、原截止时间、可信输入身份和候选指纹。启动前先提交执行意图及预算预留。执行结束后持久化独立评估凭证、产物指纹和已结算用量。远程作业 ID 接入留给 Slurm 阶段。
 2. **对账后才恢复**。通过任务 ID 重新打开，由单一实例核验原规则、有效产物和剩余预算。经验证的已完成实验直接复用。若在“已记录意图、尚无完成证据”的窗口崩溃，保留预留并暂停相关操作。查询或核验类步骤可重放，外部启动和模型请求只有在副作用可确认时才有资格续跑。已有合法历史最佳仍可独立交付。

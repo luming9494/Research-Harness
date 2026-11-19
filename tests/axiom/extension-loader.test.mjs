@@ -21,6 +21,8 @@ test("compiled Pi RPC starts offline and exposes AXIOM commands without a model 
   assert.ok(response.data.commands.some(command => command.name === "axiom-tiny"));
   assert.ok(response.data.commands.some(command => command.name === "axiom-stop"));
   assert.ok(response.data.commands.some(command => command.name === "axiom-task"));
+  // 原生 RPC 能发现恢复命令。
+  assert.ok(response.data.commands.some(command => command.name === "axiom-task-resume"));
   assert.ok(response.data.commands.some(command => command.name === "axiom-task-stop"));
 });
 
@@ -30,6 +32,6 @@ test("AXIOM is opt-in and loads with the native compiled Pi extension loader", a
   const result = await loadExtensions([resolve("axiom/extensions/axiom-tiny.ts")], resolve("."));
   assert.deepEqual(result.errors, []);
   assert.equal(result.extensions.length, 1);
-  assert.deepEqual([...result.extensions[0].commands.keys()], ["axiom-task", "axiom-task-stop", "axiom-tiny", "axiom-stop"]);
+  assert.deepEqual([...result.extensions[0].commands.keys()], ["axiom-task", "axiom-task-resume", "axiom-task-stop", "axiom-tiny", "axiom-stop"]);
   assert.equal(result.extensions[0].tools.size, 0, "No training tools before human approval");
 });

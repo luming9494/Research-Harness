@@ -4,7 +4,7 @@
 
 > **当前状态：WP-04 的可信 Tiny CPU 优化已通过两阶段真实 LLM 主流程验收。** 第二阶段通过原生 Pi RPC 完成两轮自主候选，独立 validation accuracy 从 0.5 提升至 1.0，并交付可独立重载的最佳模型。候选较差、平分或失败后的回退覆盖来自离线测试。终端键盘与视觉交互仍待验收。详见 [验收记录](docs/AXIOM_VALIDATION.md)。
 
-> **WP-05 已通过运行时验证。** Pi Durable + SQLite 的测试在强制结束进程后恢复了同一任务及预留记录，并阻止状态不明的操作重复启动。Tiny CPU 实验账本与原生 CLI 恢复尚待接入。[WP-05 验证](docs/AXIOM_WP05_RUNTIME.md)
+> **WP-05.2 支持可信 Tiny CPU 任务跨进程恢复。** 原生 Pi 扩展使用 Pi Durable + SQLite 保存实验账本。真实 CPU 验收中，首轮后强制结束进程，再用原任务 ID 恢复，仅训练剩余的唯一候选。状态不明的操作保留原预留并暂停。[WP-05 验证](docs/AXIOM_WP05_RUNTIME.md)
 
 ## 为什么重新基于 Pi 源码开发？
 
@@ -54,7 +54,8 @@ Research-Harness/
 │   ├── axiom-tiny.ts           # 显式入口，保留单候选命令
 │   └── axiom-task.ts           # 原生多轮工具、usage 与生命周期桥接
 ├── axiom/durable/
-│   └── task-runtime.ts         # Pi Durable 运行时与单写者保护
+│   ├── task-runtime.ts         # Pi Durable 运行时与单写者保护
+│   └── experiment-ledger.ts    # 权威任务快照与原子提交
 ├── examples/
 │   ├── tiny-ml-task/           # 固定合成基线模型
 │   ├── tiny-ml-eval/           # 训练、验证、判题与源码审查
@@ -163,6 +164,9 @@ CLI 参数可以透传，例如 `npm run axiom -- --offline --version`、`npm ru
 
 ### 重要限制
 
+- 新建的 `/axiom-task` 会保存 SQLite 实验账本。进程异常退出后，在同一仓库和 Python 环境运行 `/axiom-task-resume <任务 ID>`。任务 ID 是工作目录名（例如 `wp04-ABC123`）。从账本恢复原批准规则、预算、截止时间和历史最佳。正常停止或显式取消保持终态，旧的纯 JSON 任务记录继续用于查看。
+- 多轮模式发起模型请求前，Pi 配置中须显式设置 `retry.provider.maxRetries: 0`。在项目独立的 Pi `settings.json` 中合并 `{"retry":{"provider":{"maxRetries":0}}}`，保留其他设置。训练调用和恢复命令本身无需模型请求。
+
 - `/axiom-tiny` 保留单候选流程；`/axiom-task` 支持多轮预算流程。两者都只支持固定可信合成任务，不支持任意课程作业/论文仓库。
 - 工具层限制路径、命令与候选语法；原生 Pi TUI 的插件机制仍运行在用户系统权限下，**不能把它当作 OS 安全沙箱**。
 - Tiny 模式期间会禁用其他模型工具并拦截非 AXIOM Tool Calls；退出模式后恢复之前的工具选择。其他扩展自身的执行和用户主动运行的 Shell 不在此保证范围内。
@@ -171,7 +175,7 @@ CLI 参数可以透传，例如 `npm run axiom -- --offline --version`、`npm ru
 
 ## 下一步开发重点
 
-1. **P0**：将 WP-05 持久运行时接入 Tiny CPU 实验账本与恢复入口。用 AXIOM-Bench 验证故障恢复，并对照多保真搜索与现有完整训练策略。
+1. **P0**：以 WP-05.2 的任务恢复为基线建设 AXIOM-Bench，再对照多保真搜索与现有完整训练策略。
 2. **P1**：完成四层上下文、工具治理与实验证据链，再验证一次受控策略提案、评测、发布与回滚。
 3. **P2–P3**：接入 RAG、消融、分级复现和 Slurm GPU 作业。账本与报告稳定后增加管理界面。
 

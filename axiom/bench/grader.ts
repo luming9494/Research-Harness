@@ -148,6 +148,24 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 		observed.barrier === true &&
 		!observed.resumed &&
 		!observed.error;
+	// 复验恢复之前已提交的拒绝，命令、失败行和预算必须完整继承。
+	if (item.id === "T2-TRACE-01") {
+		const before = await read<TaskCheckpoint>(root, "before/ledger.json");
+		checks.recovery_history = outcome(
+			observed.interrupted === true &&
+				observed.resumed === state.taskId &&
+				before.taskId === state.taskId &&
+				before.deadline === state.deadline &&
+				same(before.commands, state.commands) &&
+				same(before.rows, state.rows) &&
+				before.rows.some((row) => row.failure_category === "invalid_candidate") &&
+				before.summary.budget.training_steps_reserved === 80 &&
+				state.summary.budget.training_steps_reserved === 80,
+			"before/ledger.json",
+			"final/ledger.json",
+			"observed.json",
+		);
+	}
 	checks.budget = outcome(validBudget(item, state, intentionalPause), "final/ledger.json");
 	checks.operations = outcome(
 		await verifyOperations(root, state, observed),

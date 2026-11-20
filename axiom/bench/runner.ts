@@ -1,14 +1,16 @@
 // 统一运行、存档与复核已批准的 Case。运行器从不接受用户提供的判题代码。
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, realpath, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rename, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { TaskCheckpoint } from "../../packages/coding-agent/src/axiom/execution/task-controller.ts";
 import { type BenchCase, selectCases } from "./cases.ts";
 import { schedule, summarize } from "./comparison.ts";
 import { executeCase } from "./execute.ts";
 import { type Grading, grade, independentGrades, liveUsage } from "./grader.ts";
-import { childOutput, type Digest, digest, file, json, save, sha256 } from "./io.ts";
+import { childOutput, type Digest, digest, file, inside, json, save, sha256 } from "./io.ts";
 import type { LiveTrace } from "./live.ts";
+import { TraceEvidence } from "./trace-evidence.ts";
+import { attributionPaths, saveSource, saveTrace, traceFiles, traceOutput } from "./trace-report.ts";
 
 const graderAssets = [
 	"axiom/bench/cases.ts",
@@ -19,6 +21,7 @@ const graderAssets = [
 	"axiom/bench/runner.ts",
 	"axiom/bench/comparison.ts",
 	"axiom/bench/live.ts",
+	...["trace", "trace-evidence", "trace-report", "trace-rpc", "attribution"].map((name) => `axiom/bench/${name}.ts`),
 	"axiom/bench/deterministic.ts",
 	"axiom/durable/task-runtime.ts",
 	"axiom/durable/experiment-ledger.ts",
@@ -36,6 +39,7 @@ const graderAssets = [
 type RunState = "completed" | "timed_out" | "interrupted" | "error" | "integrity_rejected";
 interface Manifest {
 	schema_version: 1;
+	trace_schema_version?: 1;
 	case_id: string;
 	case_version: number;
 	case_sha256: string;
@@ -69,6 +73,7 @@ export interface Result extends Grading {
 	matches_expected: boolean;
 	wall_seconds: number;
 	failures: string[];
+	attribution?: typeof attributionPaths;
 }
 
 export async function runBatch(
@@ -93,12 +98,33 @@ export async function runBatch(
 			order: plan.map(({ item, path, repetition }) => ({ item, path, repetition })),
 		});
 	const results: Result[] = [];
+	// 先发布含完整计划分母的汇总，再逐条原子替换。进程被强制终止时仍留有 incomplete。
+	const refreshComparison = async (): Promise<void> => {
+		if (!comparison) return;
+		const status =
+			results.length === plan.length && !results.some((result) => result.status === "interrupted")
+				? "complete"
+				: "incomplete";
+		await json(root, "comparison.tmp", {
+			schema_version: 2,
+			phase: comparison.phase,
+			status,
+			planned: plan.length,
+			executed: results.length,
+			passed: results.filter((result) => result.task_success.status === "pass").length,
+			interrupted: signal.aborted,
+			groups: summarize(plan, results, comparison.phase),
+		});
+		await rename(join(root, "comparison.tmp"), join(root, "comparison.json"));
+	};
+	await refreshComparison();
 	// 单机串行执行，减少 CPU 噪声，批次目录只含独立运行。
 	for (const { item, path } of plan) {
 		if (signal.aborted) break;
 		const caseRoot = join(root, path);
 		await mkdir(caseRoot, { recursive: true });
 		results.push(await runCase(repo, python, caseRoot, item, environment, signal));
+		await refreshComparison();
 	}
 	await json(root, "batch.json", {
 		schema_version: 1,
@@ -106,13 +132,7 @@ export async function runBatch(
 		requested: cases.map((item) => item.id),
 		results,
 	});
-	if (comparison)
-		await json(root, "comparison.json", {
-			schema_version: 1,
-			phase: comparison.phase,
-			interrupted: signal.aborted,
-			groups: summarize(plan, results),
-		});
+	if (signal.aborted) await refreshComparison();
 	return { root, results };
 }
 
@@ -156,9 +176,12 @@ async function runCase(
 			status = signal.aborted ? "interrupted" : deadline.aborted ? "timed_out" : "error";
 		error = caught instanceof Error ? caught.message : String(caught);
 	}
+	// 仅记录可公开的宿主终态，避免异常原文进入 Trace。
+	await json(root, "runner-status.json", { status });
 	const evidence = await Promise.all((await evidenceFiles(root)).map((path) => digest(root, path)));
 	const manifest: Manifest = {
 		schema_version: 1,
+		trace_schema_version: 1,
 		case_id: item.id,
 		case_version: item.version,
 		case_sha256,
@@ -173,6 +196,12 @@ async function runCase(
 		evidence,
 	};
 	const result = finalResult(item, manifest, graded, await retainedUsage(item, root));
+	// 归因在评分完成后运行，四个派生文件随后单独登记入清单。
+	await saveTrace(root, await traceOutput(root, manifest, evidence, inputs, result));
+	const derived = await Promise.all(traceFiles.map((path) => digest(root, path)));
+	manifest.evidence = [...evidence, ...derived].sort((a, b): number =>
+		a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+	);
 	await json(root, "manifest.json", manifest);
 	await json(root, "result.json", result);
 	await save(root, "report.md", report(item, manifest, result));
@@ -202,9 +231,60 @@ export async function verifyRun(repo: string, root: string): Promise<Result> {
 		manifest.status === "completed" ? await grade(item, root) : undefined,
 		await retainedUsage(item, root),
 	);
+	if (manifest.trace_schema_version === 1) {
+		const raw = archived.filter((item) => !traceFiles.some((name) => name === item.path));
+		const derived = await traceOutput(root, manifest, raw, manifest.inputs, result);
+		for (const name of traceFiles)
+			if ((await file(root, name)).toString("utf8") !== derived[name])
+				throw new Error("Saved trace differs from independent derivation");
+	}
 	if (JSON.stringify(result) !== JSON.stringify(await read(root, "result.json")))
 		throw new Error("Saved result differs from independent score");
 	return result;
+}
+
+// 用原始 Case 和原判复核历史归档，只在新目录写派生归因，保留既有成绩及文件。
+export async function attributeArchive(root: string, output: string): Promise<string> {
+	const manifestFile = await file(root, "manifest.json");
+	const manifest = JSON.parse(manifestFile.toString("utf8")) as Manifest;
+	const [item] = selectCases(undefined, [manifest.case_id]);
+	if (
+		manifest.schema_version !== 1 ||
+		manifest.case_version !== item.version ||
+		manifest.case_sha256 !== sha256(JSON.stringify(item)) ||
+		manifest.case_sha256 !== sha256(JSON.stringify(await read(root, "case.json")))
+	)
+		throw new Error("Historical Case identity mismatch");
+	// 判题器读取的目录必须与旧清单一一对应，避免未登记文件影响重算。
+	if (
+		JSON.stringify(await evidenceFiles(root)) !== JSON.stringify(manifest.evidence.map((entry) => entry.path).sort())
+	)
+		throw new Error("Historical evidence inventory mismatch");
+	await new TraceEvidence(root, manifest.evidence).verifyAll();
+	const replay = finalResult(
+		item,
+		manifest,
+		manifest.status === "completed" ? await grade(item, root) : undefined,
+		await retainedUsage(item, root),
+	);
+	const original = (await read(root, "result.json")) as Result;
+	if (
+		original.run_id !== manifest.run_id ||
+		original.case_id !== item.id ||
+		original.status !== manifest.status ||
+		JSON.stringify(original.task_success) !== JSON.stringify(replay.task_success) ||
+		JSON.stringify(original.harness_correctness) !== JSON.stringify(replay.harness_correctness)
+	)
+		throw new Error("Historical scores differ from independent evidence");
+	const parent = await realpath(output);
+	const archive = await realpath(root);
+	// 目标目录必须独立，禁止在历史归档内生成文件。
+	if (parent === archive || inside(archive, parent))
+		throw new Error("Historical attribution needs a separate directory");
+	const destination = await mkdtemp(join(parent, "axiom-attribution-"));
+	await saveTrace(destination, await traceOutput(root, manifest, manifest.evidence, manifest.inputs, replay));
+	await saveSource(destination, sha256(manifestFile));
+	return destination;
 }
 
 function finalResult(
@@ -234,6 +314,7 @@ function finalResult(
 		wall_seconds: manifest.wall_seconds,
 		...actual,
 		failures,
+		...(manifest.trace_schema_version === 1 ? { attribution: attributionPaths } : {}),
 		matches_expected:
 			manifest.status === "completed" &&
 			actual.task_success.status === item.expected.task &&
@@ -274,6 +355,9 @@ function report(item: BenchCase, manifest: Manifest, result: Result): string {
 				]
 			: []),
 		"## Failure evidence",
+		...(result.attribution
+			? ["[Trace](trace.jsonl) · [Attribution](attribution.md) · [Evidence index](trace-evidence.json)"]
+			: []),
 		result.failures.map((failure) => `- ${failure}`).join("\n") || "- None observed.",
 		"## Independent evaluation",
 		result.evaluation

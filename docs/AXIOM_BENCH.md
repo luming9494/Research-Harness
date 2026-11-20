@@ -44,6 +44,8 @@ Case Schema v1 记录 ID、类别、版本、任务描述、能力、数据与�
 - `observed.json`、`*/ledger.json`、`*/events.jsonl` 和归档 Worker 命令保存收集证据。模型归档仅保留工具名和用量事件。子进程耗时不是 CPU 时间，估算费用也不等于供应商账单。
 - `--verify` 核对当前资产身份和归档摘要，再重算两个评分轴并比对原结果。评分文件、Case 规则或证据被改动会被拒绝。超时和中断保存真实状态，证据不足时逐轴标为 unknown。
 
+WP-07.3 生成 `trace.jsonl`、`attribution.json`、`attribution.md` 和 `trace-evidence.json`，复核时重算归因。`--attribute <run-directory>` 为历史归档在新目录生成派生分析，原结果继续按当时的判题规则保存。[失败归因协议](AXIOM_FAILURE_ATTRIBUTION.md)
+
 ## 范围与 WP-07.2 对照
 
 本版本为 Windows 单机 Tiny CPU 验收。合成用例、固定候选 CPU 和真实自主执行分别报告。留出示例是仓库内主机资产，适用于现有受限工具路径，公开仓库不构成面向任意代码执行器的秘密留出平台。摘要用于识别改动，主机和保存的清单是信任根。依赖资产内容发生变化时，可使用原版本复核归档。

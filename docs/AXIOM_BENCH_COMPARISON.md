@@ -125,3 +125,5 @@ npm run bench:axiom -- --profile core --out private/axiom-bench-wp072-verified
 - 执行子进程耗时含 Python 启动、训练及独立评估的进程等待，无法从中推导硬件 CPU 时间。费用为 Pi 模型目录估算。
 - 仓库内的 Holdout 标签表示主机管理的评测边界，资产可由公开源码读到。模型工具没有读取评分器或未开放资产的入口。
 - 同一任务按组比较。跨任务的综合胜率与统计显著性留待更大样本和不同领域验证。
+
+WP-07.3 增加对三个历史 AST 拒绝的离线归因及比较汇总 Schema v2。本文保留原 27 次结果及 Schema v1 汇总摘要。[历史失败复盘](AXIOM_FAILURE_ATTRIBUTION.md)

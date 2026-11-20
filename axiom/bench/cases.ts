@@ -391,7 +391,36 @@ const mechanismCases = [
 	),
 ];
 
-export const cases: readonly BenchCase[] = [...core, ...comparisonCases, ...mechanismCases];
+// 稳定 Case 复用原生恢复进程，验证已提交的失败在重新打开后仍存在。
+const traceCases = [
+	entry(
+		"T2-TRACE-01",
+		"fixed_cpu",
+		"Retain an actual AST rejection across recovery and verify a baseline-only delivery",
+		"fail",
+		["budget", "operations", "provenance", "recovery_history"],
+		{
+			accuracy_floor: 0.95,
+			injection: "Terminate after committing a recoverable static review rejection",
+			evidence: [
+				"before/ledger.json",
+				"final/ledger.json",
+				"final/events.jsonl",
+				"observed.json",
+				"verification.json",
+			],
+			budget: {
+				max_tokens: 100_000,
+				max_steps: 244,
+				max_proposals: 2,
+				max_compute_seconds: 300,
+				max_task_wall_seconds: 600,
+			},
+		},
+	),
+];
+
+export const cases: readonly BenchCase[] = [...core, ...comparisonCases, ...mechanismCases, ...traceCases];
 
 export function selectCases(profile: string | undefined, ids: readonly string[]): BenchCase[] {
 	if (profile && ids.length) throw new Error("Choose a profile or a list of Case IDs");
@@ -412,6 +441,8 @@ export function selectCases(profile: string | undefined, ids: readonly string[])
 			return comparisonCases;
 		case "mechanisms":
 			return mechanismCases;
+		case "trace":
+			return traceCases;
 		default:
 			throw new Error(`Unknown profile ${profile}`);
 	}

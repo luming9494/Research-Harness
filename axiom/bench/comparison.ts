@@ -70,11 +70,17 @@ function distribution(values: readonly (number | null)[]): {
 }
 
 // 汇总保留每一条运行路径和失败原因，错误也占独立试验分母。
-export function summarize(plan: readonly ComparisonRun[], results: readonly Result[]): object[] {
+export function summarize(
+	plan: readonly ComparisonRun[],
+	results: readonly Result[],
+	phase: "pilot" | "formal" = "pilot",
+): object[] {
 	return [...new Set(plan.map((entry) => entry.item))].map((item): object => {
 		const assigned = plan.flatMap((entry, index) => (entry.item === item ? [{ entry, result: results[index] }] : []));
 		const runs = assigned.flatMap(({ result }) => (result ? [result] : []));
 		const passed = runs.filter((run) => run.task_success.status === "pass").length;
+		const complete = runs.length === assigned.length && !runs.some((run) => run.status === "interrupted");
+		const denominator = phase === "formal" ? assigned.length : runs.length;
 		const failureTypes = new Map<string, number>();
 		for (const run of runs)
 			if (
@@ -93,9 +99,12 @@ export function summarize(plan: readonly ComparisonRun[], results: readonly Resu
 			case_id: item.id,
 			...item.comparison,
 			planned: assigned.length,
+			executed: runs.length,
 			n: runs.length,
+			status: complete ? "complete" : "incomplete",
 			passed,
-			success_rate: runs.length ? passed / runs.length : null,
+			success_rate: denominator ? passed / denominator : null,
+			executed_success_rate: runs.length ? passed / runs.length : null,
 			valid_deliveries: delivered,
 			valid_delivery_rate: runs.length ? delivered / runs.length : null,
 			harness_failures: runs.filter((run) => run.harness_correctness.status === "fail").length,
@@ -106,7 +115,11 @@ export function summarize(plan: readonly ComparisonRun[], results: readonly Resu
 			).length,
 			harness_unknown: runs.filter((run) => run.harness_correctness.status === "unknown").length,
 			failures: Object.fromEntries(failureTypes),
-			passes: [1, 2, 3].map((k) => passStatistics(runs.length, passed, k)),
+			passes: [1, 2, 3].map((k) =>
+				phase === "formal" && !complete
+					? { k, n: runs.length, subsets: null, pass_at_k: null, pass_all_k: null }
+					: passStatistics(runs.length, passed, k),
+			),
 			requests: distribution(runs.map((run) => run.usage.requests)),
 			tokens: distribution(runs.map((run) => run.usage.tokens)),
 			estimated_cost_usd: distribution(runs.map((run) => run.usage.estimated_cost_usd)),

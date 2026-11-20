@@ -7,10 +7,12 @@ import {
 	type TaskSpec,
 } from "../../packages/coding-agent/src/axiom/execution/task-spec.ts";
 import type { BenchCase } from "./cases.ts";
+import { type PiToolEvent, type PiToolReceipt, toolReceipt } from "./trace-rpc.ts";
 
 export interface LiveTrace {
 	workspace: string | null;
 	tools: string[];
+	tool_evidence: PiToolReceipt[];
 	turns: { tools: string[] }[];
 	admitted: number;
 	usage: { provider: string; model: string; tokens: number | null; cost: number | null; stop_reason?: string }[];
@@ -18,7 +20,7 @@ export interface LiveTrace {
 	resumed: boolean;
 	error: string | null;
 }
-interface RpcEvent {
+interface RpcEvent extends PiToolEvent {
 	id?: string;
 	type: string;
 	method?: string;
@@ -71,6 +73,7 @@ export async function runLive(
 	const trace: LiveTrace = {
 		workspace: null,
 		tools: [],
+		tool_evidence: [],
 		turns: [],
 		admitted: 0,
 		usage: [],
@@ -165,6 +168,9 @@ function drive(
 		child.stderr.resume();
 		child.stdin.on("error", () => {});
 		const handle = (event: RpcEvent): void => {
+			// 进程编号使恢复前后重复使用的原生工具 ID 保持独立。
+			const receipt = toolReceipt(event, resumeId ? 2 : 1, trace.admitted || trace.usage.length);
+			if (receipt) trace.tool_evidence.push(receipt);
 			if (event.type === "response" && event.success === false) {
 				fail(`Pi RPC command failed: ${event.command}`);
 				return;

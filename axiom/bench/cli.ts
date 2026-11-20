@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { cases, selectCases } from "./cases.ts";
-import { runBatch, verifyRun } from "./runner.ts";
+import { attributeArchive, runBatch, verifyRun } from "./runner.ts";
 
 async function main(): Promise<void> {
 	const repo = fileURLToPath(new URL("../../", import.meta.url));
@@ -13,6 +13,7 @@ async function main(): Promise<void> {
 			profile: { type: "string" },
 			out: { type: "string" },
 			verify: { type: "string" },
+			attribute: { type: "string" },
 			list: { type: "boolean" },
 			phase: { type: "string" },
 			repeats: { type: "string" },
@@ -22,10 +23,18 @@ async function main(): Promise<void> {
 	});
 	if (values.help) {
 		console.log(
-			"npm run bench:axiom -- [--profile core|smoke|live|comparison|mechanisms | --case ID ...] [--out DIR] [--list]\n" +
+			"npm run bench:axiom -- [--profile core|smoke|live|comparison|mechanisms|trace | --case ID ...] [--out DIR] [--list]\n" +
 				"npm run bench:axiom -- --profile comparison --phase pilot|formal [--repeats N]\n" +
-				"npm run bench:axiom -- --verify <case-run-directory>",
+				"npm run bench:axiom -- --verify <case-run-directory>\n" +
+				"npm run bench:axiom -- --attribute <case-run-directory> [--out EXISTING-DIR]",
 		);
+		return;
+	}
+	if (values.attribute) {
+		if (values.verify || values.profile || values.case || values.list || values.phase || values.repeats)
+			throw new Error("--attribute only accepts --out");
+		const root = await attributeArchive(resolve(values.attribute), resolve(values.out ?? join(repo, "private")));
+		console.log(JSON.stringify({ root }));
 		return;
 	}
 	if (values.verify) {

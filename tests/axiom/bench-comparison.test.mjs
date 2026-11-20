@@ -76,6 +76,17 @@ test("BENCH-072-03 detects real violations and regrades the recovered v3 CPU cas
 		const runRoot = join(root, run.case_id);
 		assert.equal(run.matches_expected, true, `${run.case_id}: ${run.failures.join(", ")}`);
 		assert.deepEqual(await verifyRun(repo, runRoot), run);
+		// 复用真实机制证据验证归因，同时保留两个原评分轴的断言。
+		const attribution = JSON.parse(await readFile(join(runRoot, "attribution.json"), "utf8"));
+		const category = {
+			"T2-POL-01": "policy_violation", "T2-DUR-02": "policy_violation", "T2-BUD-01": "budget_failure",
+			"T2-EVAL-01": "evidence_integrity_failure", "T2-SEARCH-02": "evaluation_failure",
+		}[run.case_id];
+		if (category) {
+			const failure = attribution.failures.find(entry => entry.category === category);
+			assert.ok(failure?.evidence.length, run.case_id);
+			assert.equal(failure.impact.harness_correctness, "fail");
+		} else assert.deepEqual(attribution.failures, []);
 	}
 	const duplicate = results.find(run => run.case_id === "T2-DUR-02");
 	assert.equal(duplicate.execution.duplicate_launches, 1);

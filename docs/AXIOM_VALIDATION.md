@@ -1,5 +1,13 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-07.3 执行轨迹与失败归因
+
+最终真实 DeepSeek Flash 运行生成 35 条 Trace，模型请求、工具返回、审查、训练、独立评估与交付可关联。独立 Full accuracy 为 **0.998046875**，双轴均为 100，`--verify` 通过。两次本轮实调共 **6 次请求、11,644 Token、Pi 估算 USD 0.002414172**。
+
+离线 Case 独立复核通过，覆盖策略拒绝、原截止耗尽、未知操作和真实 AST 拒绝跨进程保留。三条 WP-07.2 失败均复核为候选 AST 拒绝，原评分和统计摘要一致。历史模型理解和反馈充分性保持未知。新正式汇总以计划数为分母，标记未完成运行并隐藏未完成组的经验通过统计。[轨迹、历史复盘和证据路径](AXIOM_FAILURE_ATTRIBUTION.md)
+
+`npm run build:offline`、`npm run check` 与 `npm run test:ml` 通过。全量 ML 回归 **109/109**，包括 Python 18、Node 74、Pi Session 17，保留原有 105 项。Trace 定向命令单独通过 **4/4**。
+
 ## WP-07.2 真实 Agent 对照验收
 
 Windows 上的 `npm run build:offline`、`npm run check` 和 `npm run test:ml` 均通过。全量 ML 回归为 **105/105**，由 Python 18、Node 70、Pi Session 17 项组成。原有 102 项保留，新增三项覆盖固定对照设计与统计、模型用量准入语义、真实机制负例与 v3 阶段复核。旧版 `core` 的 9 个 Case 均符合预期。

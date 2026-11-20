@@ -15,7 +15,7 @@ const usage = {
 	usage: { input: 98, output: 25, cacheRead: 0, cacheWrite: 0, totalTokens: 123 },
 };
 
-if (["start", "bench-start", "reserve", "hold-worker", "hold-intent", "hold-started", "hold-delivery", "training", "clock", "fail-reservation", "fail-settlement", "hp-start"].includes(action)) {
+if (["start", "bench-start", "trace-before", "reserve", "hold-worker", "hold-intent", "hold-started", "hold-delivery", "training", "clock", "fail-reservation", "fail-settlement", "hp-start"].includes(action)) {
 	let activeTask: TaskController | undefined;
 	const open: OpenTaskLedger = async (directory) => {
 		const ledger = await openExperimentLedger(directory);
@@ -53,7 +53,7 @@ if (["start", "bench-start", "reserve", "hold-worker", "hold-intent", "hold-star
 	};
 	// 模型请求用量是固定测试数据，训练和独立 validation 仍由真实 Python 执行。
 	const common = { task: "tiny-xor-v1", goal: "Offline cross-process recovery", rules: TASK_RULES, budget: DEFAULT_BUDGET };
-	const spec = action === "hp-start"
+	const spec = action === "hp-start" || action === "trace-before"
 		? { ...common, version: 2, objective: { metric: "accuracy", direction: "maximize", target: null }, max_revisions: 1,
 			parameters: { learning_rate: { min: 0.01, max: 0.08 } } }
 		: { ...common, version: 1, target_accuracy: null };
@@ -80,6 +80,11 @@ if (["start", "bench-start", "reserve", "hold-worker", "hold-intent", "hold-star
 		await task.invoke("baseline", {});
 		await task.invoke("candidate", { content: strong, rationale: "Fixed strong XOR candidate" });
 	}
+	// 在可修订的真实 AST 拒绝落盘后强制终止。恢复后保留历史，交付原 baseline。
+	if (action === "trace-before") {
+		await task.invoke("baseline", {});
+		await task.invoke("candidate", { content: `HIDDEN = 8\n${strong}`, rationale: "Fixed illegal structure fixture" });
+	}
 	if (!action.startsWith("fail-")) console.log(JSON.stringify({ ready: task.snapshot(), taskId: basename(task.root) }));
 	// 控制进程读取 ready 后强制终止，不经过扩展的正常取消流程。
 } else {
@@ -95,6 +100,7 @@ if (["start", "bench-start", "reserve", "hold-worker", "hold-intent", "hold-star
 	const task = await TaskController.resume(repo, python, taskId, openExperimentLedger, noop);
 	try {
 		const before = task.snapshot();
+		if (action === "trace-resume") await task.stop("user_finished");
 		if (action === "resume") {
 			await task.invoke("baseline", {});
 			await task.invoke("candidate", { content: "# 同结构复用\n" + strong, rationale: "Structure cache after restart" });

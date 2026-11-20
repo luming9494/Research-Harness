@@ -6,7 +6,7 @@ import type { TaskCheckpoint } from "../../packages/coding-agent/src/axiom/execu
 import { openExperimentLedger } from "../durable/experiment-ledger.ts";
 import type { BenchCase } from "./cases.ts";
 import { deterministic } from "./deterministic.ts";
-import { childOutput, file, inside, json, save } from "./io.ts";
+import { childOutput, file, inside, json, save, sha256 } from "./io.ts";
 import { runLive } from "./live.ts";
 
 const recovery = "tests/fixtures/axiom-cpu-recovery-worker.ts";
@@ -57,6 +57,16 @@ export async function executeCase(
 		if (!task || !taskPattern.test(task) || (id && task !== id)) throw new Error("Invalid task receipt");
 		return { id: task, interrupted: result.interrupted };
 	};
+	// 新归因用例沿用既有真实恢复 worker 和同步点。
+	if (item.id === "T2-TRACE-01") {
+		const stopped = await run(recovery, "trace-before", undefined, true);
+		await captureTask(repo, root, stopped.id, "before");
+		await run(recovery, "trace-resume", stopped.id);
+		const state = await captureTask(repo, root, stopped.id, "final");
+		await json(root, "observed.json", { interrupted: stopped.interrupted, resumed: stopped.id });
+		await json(root, "verification.json", await verifyArtifacts(repo, root, python, state, "final", signal));
+		return;
+	}
 	if (item.id === "T1-DUR-01" || item.id === "T1-BUD-01" || item.id === "T2-DUR-01") {
 		const start = item.id === "T1-DUR-01" ? "reserve" : item.id === "T1-BUD-01" ? "clock" : "bench-start";
 		const next = item.id === "T1-DUR-01" ? "probe" : item.id === "T1-BUD-01" ? "probe-after-deadline" : "resume";
@@ -181,6 +191,17 @@ async function captureTask(
 		throw error;
 	});
 	await save(root, `${label}/events.jsonl`, events);
+	// 保存审查所读源码的摘要。审查失败时控制器可能尚未登记候选指纹。
+	const sources: Record<string, string> = {};
+	for (const id of new Set(state.commands.filter((op) => op.script === "review_candidate.py").map((op) => op.runId))) {
+		if (!/^(baseline|exp-[1-9][0-9]*)$/.test(id)) continue;
+		const source = await file(workspace, `sources/${id}/model.py`).catch((error: NodeJS.ErrnoException) => {
+			if (error.code === "ENOENT") return undefined;
+			throw error;
+		});
+		if (source) sources[id] = sha256(source);
+	}
+	if (Object.keys(sources).length) await json(root, `${label}/candidate-sources.json`, sources);
 	for (const op of state.commands)
 		if ("recordSha256" in op) {
 			const path = `commands/${String(op.id).padStart(3, "0")}.json`;

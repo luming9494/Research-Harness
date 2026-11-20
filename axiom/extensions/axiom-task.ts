@@ -265,8 +265,10 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       if (!await ctx.ui.confirm("AXIOM multi-round Tiny Task", `${JSON.stringify(spec, null, 2)}\nAllow local CPU experiments? Chat uses the selected Pi model and may incur fees. Token admission is estimated, not an absolute provider billing cap.`)) return;
       const approval = { approvedAt: new Date().toISOString(), sessionId: ctx.sessionManager.getSessionId() };
       // 操作者配置只在创建新任务时读取。回退仅对新建任务生效。
-      const selected = await openTaskPolicy(host.create ? undefined : process.env.AXIOM_HARNESS_POLICY, configuredContext);
-      if (selected.fallback) ctx.ui.notify("Harness policy rejected. Using the approved baseline for this new task.", "warning");
+      // Bench 隔离使用冻结的候选文件。生产指针只在新任务审批后读取。
+      const selected = await openTaskPolicy(host.create ? undefined : process.env.AXIOM_HARNESS_POLICY, configuredContext,
+        host.comparison || host.create ? undefined : process.env.AXIOM_POLICY_REGISTRY);
+      if (selected.fallback) ctx.ui.notify("Harness policy rejected. Using a verified fallback for this new task.", "warning");
       // 三组共用原始审批，生产入口默认使用 Durable 控制器。
       const controller = host.create
         ? await host.create(repo, pythonPath(), spec, () => ctx.abort(), approval)

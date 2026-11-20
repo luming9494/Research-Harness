@@ -45,3 +45,5 @@ node --conditions=source --experimental-strip-types --test tests/axiom/evolution
 ## 当前限制
 
 仅覆盖一次匹配运行的 Tiny XOR 开发 Case，故意注入的 AST 错误用于验证修订行为，无法推断真实任务中的自然错误频率。这里同时调整了多个字段，模型行为和请求数有随机性。独立留出验证、正式发布和回滚属于后续阶段。
+
+WP-09.2 在新固定输入版本上重新执行重复对照及独立留出，保留以上单次结果和待定结论作为历史记录。[重复评测与发布门槛](AXIOM_POLICY_RELEASE.md)

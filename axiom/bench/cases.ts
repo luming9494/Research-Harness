@@ -525,6 +525,26 @@ const governanceCase = entry(
 	},
 );
 
+// 留出条件预注册，仅供宿主评测。提案管线拒收这个 split 的归档。
+const releaseHoldout: BenchCase = {
+	...contextCases[1],
+	id: "T3-REL-01",
+	category: "REL",
+	capability: "release_holdout",
+	split: "holdout",
+	description:
+		"Starting from the approved shallow tanh model, validate two distinct improvements and preserve the first result across process recovery.",
+	accuracy_floor: 0.98,
+	comparison: {
+		arm: "B2",
+		task: "feedback",
+		min_full_candidates: 2,
+		starting_model: "shallow_tanh",
+		learning_rate: { min: 0.02, max: 0.06 },
+	},
+};
+if (!Check(schema, releaseHoldout)) throw new Error("Invalid built-in release holdout");
+
 export const cases: readonly BenchCase[] = [
 	...core,
 	...comparisonCases,
@@ -532,6 +552,7 @@ export const cases: readonly BenchCase[] = [
 	...traceCases,
 	...contextCases,
 	governanceCase,
+	releaseHoldout,
 ];
 
 export function selectCases(profile: string | undefined, ids: readonly string[]): BenchCase[] {

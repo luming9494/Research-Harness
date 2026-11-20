@@ -401,7 +401,8 @@ function report(item: BenchCase, manifest: Manifest, result: Result): string {
 	return `${sections.join("\n\n")}\n`;
 }
 
-async function identities(repo: string, item: BenchCase): Promise<Digest[]> {
+/** 为候选冻结批次预登记与独立复核相同的输入身份。 */
+export async function identities(repo: string, item: BenchCase): Promise<Digest[]> {
 	return Promise.all([...new Set([...graderAssets, ...item.assets])].sort().map((path) => digest(repo, path)));
 }
 

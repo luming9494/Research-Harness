@@ -35,7 +35,13 @@ export interface Candidate {
 }
 
 /** 完整设置仍由 WP-08.2 的白名单 Schema 校验，禁止模型声明任何身份字段。 */
-export function propose(text: string, parent: PolicyBinding, version: number, createdAt: string): Candidate {
+export function propose(
+	text: string,
+	parent: PolicyBinding,
+	version: number,
+	createdAt: string,
+	mode: "novel" | "repair_fixture" = "novel",
+): Candidate {
 	const value: unknown = JSON.parse(text.trim().replace(/^```(?:json)?\s*\r?\n([\s\S]*)\r?\n```$/i, "$1"));
 	if (!Check(proposalSchema, value)) throw new Error("invalid_proposal_schema");
 	const approved = approvedPolicy(true);
@@ -61,7 +67,8 @@ export function propose(text: string, parent: PolicyBinding, version: number, cr
 	}
 	if (!Object.keys(changes).length) throw new Error("no_policy_change");
 	// 使用相同的规范化规则拒绝换序后重新提交批准基线。
-	if (bindPolicy(config, true).sha256 === binding.sha256) throw new Error("duplicates_approved_policy");
+	if (mode === "novel" && bindPolicy(config, true).sha256 === binding.sha256)
+		throw new Error("duplicates_approved_policy");
 	return {
 		binding,
 		parent_sha256: previous.sha256,

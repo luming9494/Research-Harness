@@ -28,6 +28,7 @@
 			"axiom/bench/**/*.ts",
 			"axiom/context/**/*.ts",
 			"axiom/evolution/**/*.ts",
+			"axiom/release/**/*.ts",
 			"scripts/model-catalog-protocol.ts",
 			"scripts/model-catalog-protocol.test.ts",
 			"packages/*/src/**/*.ts",

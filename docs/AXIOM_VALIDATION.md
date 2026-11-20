@@ -1,5 +1,15 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-09.2 策略晋升与安全回滚
+
+开发和独立留出各计划并执行 6 次，12 个真实 Run 的双轴与恢复均通过。A 因开发输入和费用上升保持待定，B 因留出输入降幅 1.7% 未达到 5% 保持待定。B 的 `--apply` 被拒绝，未创建目标注册表。负例修订将恢复回执中的 AST 原因从缺失恢复为可用。隔离 SQLite 夹具已验证发布、新旧任务强制退出和恢复、真实证据回放触发的回滚及持久审计。共 90 次真实模型请求、284,745 Token，Pi 估算 USD `0.085944504`。[实验和发布证据](AXIOM_POLICY_RELEASE.md)
+
+Windows `npm run build:offline` 与 `npm run check` 初次通过，重建后重新复核全部 12 份实际归档。Windows 发布专项 6/6。WSL2 `npm run build:offline` 通过；初次静态检查中 WSL 失去响应，重启后的默认并行回归也在 Node 组完成前退出。采用 `AXIOM_ML_TEST_CONCURRENCY=1 npm run test:ml` 后，WSL2 **131/131** 通过，其中 Python 18、Node 主批 93、Node 机制批 3、Pi Session 17。机制批 207.10 秒，Pi Session 两文件合计 140.94 秒。并发选项只改变调度，原有断言与 540/180 秒限时保留。
+
+Windows `npm run test:ml` 为 **128/131**。Python 18/18，Node 主批 93/93，机制批 2/3，Pi Session 15/17。机制批最后的 `T2-SEARCH-02` 在原有 540 秒整组限时时未完成。两项原生 CPU 用例分别触发 120 秒和 180 秒限时，前者清理目录另报 `EBUSY`。上一轮 Windows 单用例证据已显示 22 次 Python 进程依次启动，耗时逼近原限时；本轮继续保留 Windows 结果，以完整通过同一断言的 WSL2 低并发结果为主要验收。
+
+Windows 最终 `npm run check` 通过。单独执行 `node --conditions=source --experimental-strip-types axiom/bench/cli.ts --case T2-SEARCH-02 --out private/wp092-windows-search-recheck`，该机制 Case 用时 161.56 秒，与预期一致并通过 `--verify`。此补跑结果与 Windows 全量原始分数分开记录。WSL2 设进程级堆限制重试静态检查仍停滞，已结束检查会话，未调整系统资源配额。
+
 ## WP-09.1 证据驱动策略进化
 
 真实 DeepSeek Flash 从复核过的 AST 拒绝生成 A，再读取 A 的独立评测反馈生成 B。批准基线、A、B 各完成一个 `T3-CTX-02`，双轴均为 100，均成功修订与恢复，训练累计各 3 次、重复 0 次。输入 Token 为 31,082、19,205、26,897。固定筛选规则因样本不足将两个候选保留待定。提案和评测共 25 次请求、83,328 Token，Pi 估算 USD 0.024814164。[命令、候选身份和独立评测](AXIOM_SELF_EVOLUTION.md)

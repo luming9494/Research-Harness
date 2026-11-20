@@ -15,7 +15,7 @@ const usage = {
 	usage: { input: 98, output: 25, cacheRead: 0, cacheWrite: 0, totalTokens: 123 },
 };
 
-if (["start", "reserve", "hold-worker", "hold-intent", "hold-started", "hold-delivery", "training", "clock", "fail-reservation", "fail-settlement", "hp-start"].includes(action)) {
+if (["start", "bench-start", "reserve", "hold-worker", "hold-intent", "hold-started", "hold-delivery", "training", "clock", "fail-reservation", "fail-settlement", "hp-start"].includes(action)) {
 	let activeTask: TaskController | undefined;
 	const open: OpenTaskLedger = async (directory) => {
 		const ledger = await openExperimentLedger(directory);
@@ -74,6 +74,9 @@ if (["start", "reserve", "hold-worker", "hold-intent", "hold-started", "hold-del
 	} else if (action === "start" || action === "reserve") await task.reserveRequest(1500);
 	if (action === "start") {
 		await task.recordUsage(usage);
+	}
+	// Benchmark 汇报真实模型调用为零，原回归仍覆盖固定用量。
+	if (action === "start" || action === "bench-start") {
 		await task.invoke("baseline", {});
 		await task.invoke("candidate", { content: strong, rationale: "Fixed strong XOR candidate" });
 	}

@@ -11,13 +11,16 @@ const noop = (): void => {};
 const small = "from torch import nn\ndef build_model():\n    return nn.Sequential(nn.Linear(2, 2), nn.Tanh(), nn.Linear(2, 2))\n";
 const wide = "from torch import nn\ndef build_model():\n    return nn.Sequential(nn.Linear(2, 8), nn.Tanh(), nn.Linear(8, 2))\n";
 const over = "from torch import nn\ndef build_model():\n    return nn.Sequential(nn.Linear(2, 16), nn.ReLU(), nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 2))\n";
+const dominated = "from torch import nn\ndef build_model():\n    return nn.Sequential(nn.Linear(2, 16), nn.Linear(16, 16), nn.Linear(16, 2))\n";
+const bench = mode === "bench-three" || mode === "bench-floor";
 const task = id ? await TaskController.resume(repo, python, id, openExperimentLedger, noop) : await TaskController.create(
 	repo, python, {
 		version: 4, task: "tiny-xor-v1", goal: "WP-06.3 fixed CPU cost/quality comparison", rules: TASK_RULES,
-		objectives: ["accuracy", "parameters"], delivery_preference: { strategy: "frontier" },
+		objectives: bench ? ["accuracy", "parameters", "loss"] : ["accuracy", "parameters"],
+		delivery_preference: mode === "bench-floor" ? { strategy: "minimum_accuracy", minimum_accuracy: 1 } : { strategy: "frontier" },
 		fidelity: { strategy: "full_only", max_full: 3 },
 		parameters: { learning_rate: { min: 0.005, max: 0.08 } }, max_revisions: 1,
-		budget: { ...DEFAULT_BUDGET, max_experiments: 6, training_steps: 400, wall_seconds: 900, compute_process_seconds: 700 },
+		budget: { ...DEFAULT_BUDGET, max_experiments: bench ? 3 : 6, training_steps: 400, wall_seconds: 900, compute_process_seconds: 700 },
 	}, noop, { open: openExperimentLedger, approval: { approvedAt: new Date().toISOString(), sessionId: "pareto-fixture" } },
 );
 
@@ -33,7 +36,18 @@ try {
 		console.log(JSON.stringify({ before: task.snapshot() }));
 		await new Promise<never>(() => {});
 	}
-	if (mode === "continue") {
+	if (bench) {
+		// 真实三目标交付和不可达门槛共用原生内核，候选由主机固定。
+		await task.invoke("baseline", {});
+		await submit(small, 0.05, ["baseline"]);
+		if (mode === "bench-three") {
+			await submit(wide, 0.08, ["exp-1"]);
+			// 过参数化线性模型提供真实受支配的对照，而非手写低分。
+			await submit(dominated, 0.005, ["exp-1", "exp-2"]);
+		}
+		await task.stop("user_finished");
+		console.log(JSON.stringify({ after: task.snapshot() }));
+	} else if (mode === "continue") {
 		const before = task.snapshot();
 		await submit(wide, 0.08, ["exp-999"]);
 		await submit(small, 0.05, ["exp-1"]);

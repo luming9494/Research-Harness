@@ -25,6 +25,7 @@
 	},
 	"files": {
 		"includes": [
+			"axiom/bench/**/*.ts",
 			"scripts/model-catalog-protocol.ts",
 			"scripts/model-catalog-protocol.test.ts",
 			"packages/*/src/**/*.ts",

@@ -2,7 +2,7 @@
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { selectCases } from "./cases.ts";
+import { cases, selectCases } from "./cases.ts";
 import { runBatch, verifyRun } from "./runner.ts";
 
 async function main(): Promise<void> {
@@ -14,19 +14,22 @@ async function main(): Promise<void> {
 			out: { type: "string" },
 			verify: { type: "string" },
 			list: { type: "boolean" },
+			phase: { type: "string" },
+			repeats: { type: "string" },
 			help: { type: "boolean" },
 		},
 		strict: true,
 	});
 	if (values.help) {
 		console.log(
-			"npm run bench:axiom -- [--profile core|smoke|live | --case ID ...] [--out DIR] [--list]\n" +
+			"npm run bench:axiom -- [--profile core|smoke|live|comparison|mechanisms | --case ID ...] [--out DIR] [--list]\n" +
+				"npm run bench:axiom -- --profile comparison --phase pilot|formal [--repeats N]\n" +
 				"npm run bench:axiom -- --verify <case-run-directory>",
 		);
 		return;
 	}
 	if (values.verify) {
-		if (values.profile || values.case || values.out || values.list)
+		if (values.profile || values.case || values.out || values.list || values.phase || values.repeats)
 			throw new Error("--verify is a standalone command");
 		const result = await verifyRun(repo, resolve(values.verify));
 		console.log(JSON.stringify(result, null, 2));
@@ -34,8 +37,13 @@ async function main(): Promise<void> {
 		return;
 	}
 	const selected = selectCases(values.profile, values.case ?? []);
+	const phase = values.phase ?? (values.profile === "comparison" ? "pilot" : undefined);
+	if (phase !== undefined && phase !== "pilot" && phase !== "formal") throw new Error("Unknown comparison phase");
+	if ((phase || values.repeats) && (!phase || !selected.every((item) => item.comparison)))
+		throw new Error("Comparison options require comparison cases");
+	const repeats = Number(values.repeats ?? (phase === "formal" ? 3 : 1));
 	if (values.list) {
-		const listed = values.profile || values.case ? selected : [...selected, ...selectCases("live", [])];
+		const listed = values.profile || values.case ? selected : cases;
 		console.log(
 			JSON.stringify(
 				listed.map(({ id, version, mode, split }) => ({ id, version, mode, split })),
@@ -60,6 +68,7 @@ async function main(): Promise<void> {
 			resolve(values.out ?? join(repo, "private", "axiom-bench")),
 			selected,
 			signal.signal,
+			phase ? { phase, repeats } : undefined,
 		);
 		console.log(
 			JSON.stringify(
@@ -78,7 +87,16 @@ async function main(): Promise<void> {
 				2,
 			),
 		);
-		process.exitCode = signal.signal.aborted ? 130 : results.every((result) => result.matches_expected) ? 0 : 1;
+		// 正式任务的失败是一条结果；仅报告运行器中断或缺失，不能筛掉不利样本。
+		process.exitCode = signal.signal.aborted
+			? 130
+			: phase
+				? results.every((result) => result.status === "completed")
+					? 0
+					: 1
+				: results.every((result) => result.matches_expected)
+					? 0
+					: 1;
 	} finally {
 		process.removeListener("SIGINT", interrupt);
 		process.removeListener("SIGTERM", interrupt);

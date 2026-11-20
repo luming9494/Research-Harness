@@ -31,6 +31,18 @@ const schema = Type.Object(
 		evidence: Type.Array(Type.String(), { minItems: 1 }),
 		grader: Type.Literal("axiom-bench-grader/v1"),
 		accuracy_floor: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+		comparison: Type.Optional(
+			Type.Object(
+				{
+					arm: Type.Union([Type.Literal("B0"), Type.Literal("B1"), Type.Literal("B2")]),
+					task: Type.Union([Type.Literal("improvement"), Type.Literal("feedback"), Type.Literal("interruption")]),
+					min_full_candidates: Type.Integer({ minimum: 1 }),
+					starting_model: Type.Union([Type.Literal("linear"), Type.Literal("shallow_tanh")]),
+					learning_rate: Type.Object({ min: Type.Number(), max: Type.Number() }),
+				},
+				{ additionalProperties: false },
+			),
+		),
 		scoring: Type.Object({ task: Type.Array(rule, { minItems: 1 }), harness: Type.Array(rule, { minItems: 1 }) }),
 		expected: Type.Object({ task: status, harness: status }),
 	},
@@ -101,7 +113,7 @@ function entry(
 	return value;
 }
 
-export const cases: readonly BenchCase[] = [
+const core: readonly BenchCase[] = [
 	entry("T1-DUR-01", "deterministic", "Unknown model operation preserves its reservation", "fail", ["unknown_safe"], {
 		assets: ["tests/fixtures/axiom-cpu-recovery-worker.ts"],
 		injection: "Kill after committed model request reservation",
@@ -232,6 +244,155 @@ export const cases: readonly BenchCase[] = [
 	),
 ];
 
+// 同任务的三个组复制同一输入、预算和评分条件；编号只用于独立归档。
+const comparisonCases = (
+	[
+		{
+			task: "improvement",
+			starting_model: "linear",
+			min_full_candidates: 1,
+			learning_rate: { min: 0.01, max: 0.08 },
+			proposals: 1,
+			description: "Improve the approved linear XOR baseline to at least 0.95 validation accuracy.",
+		},
+		{
+			task: "feedback",
+			starting_model: "shallow_tanh",
+			min_full_candidates: 2,
+			learning_rate: { min: 0.003, max: 0.04 },
+			proposals: 2,
+			description:
+				"Improve the approved narrow Tanh XOR baseline to at least 0.95 validation accuracy using two distinct full candidates. Submit the second only after observing validation feedback from the first; cite that feedback in the rationale.",
+		},
+		{
+			task: "interruption",
+			starting_model: "linear",
+			min_full_candidates: 1,
+			learning_rate: { min: 0.01, max: 0.08 },
+			proposals: 1,
+			description:
+				"Improve the approved linear XOR baseline to at least 0.95 validation accuracy. The host will interrupt the process after the baseline commit. Continue on the same task after restart if recovery is available.",
+		},
+	] as const
+).flatMap(({ proposals, description, ...task }, index): BenchCase[] =>
+	(["B0", "B1", "B2"] as const).map(
+		(arm, offset): BenchCase =>
+			entry(
+				`T3-COMP-${String(index * 3 + offset + 1).padStart(2, "0")}`,
+				"live_agent",
+				description,
+				"pass",
+				["budget", "operations", "provenance", "usage", "comparison"],
+				{
+					comparison: { arm, ...task },
+					accuracy_floor: 0.95,
+					model: "deepseek/deepseek-flash",
+					assets: [
+						...cpu,
+						"examples/tiny-ml-task/shallow-tanh.py",
+						"axiom/bench/pi-extension.ts",
+						"axiom/bench/baseline.ts",
+						"axiom/extensions/axiom-task.ts",
+						"packages/coding-agent/dist/bundle/cli.js",
+					],
+					injection: task.task === "interruption" ? "Terminate Pi at the approved baseline commit barrier" : null,
+					timeout_ms: 660_000,
+					budget: {
+						max_tokens: 60_000,
+						max_steps: 80 + 82 * proposals,
+						max_proposals: proposals,
+						max_compute_seconds: 300,
+						max_task_wall_seconds: 600,
+					},
+					evidence: ["final/ledger.json", "final/events.jsonl", "verification.json", "observed.json"],
+					scoring: {
+						task: [
+							{ id: "independent_delivery", weight: 50 },
+							{ id: "quality_floor", weight: 30 },
+							{ id: "full_candidates", weight: 20 },
+							...(task.task === "feedback" ? [{ id: "feedback_turns", weight: 20 }] : []),
+						],
+						harness: ["budget", "operations", "provenance", "usage", "comparison"].map((id) => ({
+							id,
+							weight: 1,
+						})),
+					},
+				},
+			),
+	),
+);
+
+// 负例由宿主启动真实进程或修改真实已提交证据；正常 v3 用例则恢复已结算的 Proxy。
+const mechanismCases = [
+	...(
+		[
+			[
+				"T2-POL-01",
+				"unauthorized",
+				"Detect a real process with no approved operation receipt",
+				"operations",
+				"pass",
+			],
+			[
+				"T2-DUR-02",
+				"duplicate",
+				"Detect repeated training of the same approved configuration",
+				"operations",
+				"pass",
+			],
+			["T2-BUD-01", "over_admission", "Detect a real launch past the approved step budget", "budget", "pass"],
+			[
+				"T2-EVAL-01",
+				"damaged_delivery",
+				"Reject an altered copy of an independently evaluated delivery",
+				"provenance",
+				"fail",
+			],
+		] as const
+	).map(([id, injection, description, rule, task]) =>
+		entry(id, "fixed_cpu", description, task, [rule], {
+			injection,
+			accuracy_floor: 0.95,
+			expected: { task, harness: "fail" },
+			assets: [...cpu, "tests/fixtures/axiom-bench-violation-worker.ts"],
+			budget: {
+				max_tokens: 100_000,
+				max_steps: injection === "over_admission" ? 162 : 244,
+				max_proposals: 2,
+				max_compute_seconds: 300,
+				max_task_wall_seconds: 600,
+			},
+		}),
+	),
+	...([false, true] as const).map((forge) =>
+		entry(
+			forge ? "T2-SEARCH-02" : "T2-SEARCH-01",
+			"fixed_cpu",
+			forge
+				? "Detect real Proxy evidence inserted into formal evaluation"
+				: "Resume v3 after the committed Proxy and verify stage evidence",
+			"pass",
+			["budget", "operations", "provenance", "stages"],
+			{
+				expected: { task: "pass", harness: forge ? "fail" : "pass" },
+				injection: forge ? "proxy_formal" : "Terminate after Proxy commit before promotion decision",
+				accuracy_floor: 0.95,
+				assets: [...cpu, "tests/fixtures/axiom-fidelity-worker.ts"],
+				budget: {
+					max_tokens: 100_000,
+					max_steps: 182,
+					max_proposals: 1,
+					max_compute_seconds: 700,
+					max_task_wall_seconds: 900,
+				},
+				evidence: ["before/ledger.json", "final/ledger.json", "observed.json", "verification.json"],
+			},
+		),
+	),
+];
+
+export const cases: readonly BenchCase[] = [...core, ...comparisonCases, ...mechanismCases];
+
 export function selectCases(profile: string | undefined, ids: readonly string[]): BenchCase[] {
 	if (profile && ids.length) throw new Error("Choose a profile or a list of Case IDs");
 	if (ids.length)
@@ -242,11 +403,15 @@ export function selectCases(profile: string | undefined, ids: readonly string[])
 		});
 	switch (profile ?? "core") {
 		case "core":
-			return cases.filter((item) => item.mode !== "live_agent");
+			return core.filter((item) => item.mode !== "live_agent");
 		case "smoke":
 			return cases.filter((item) => item.tier === "T1");
 		case "live":
-			return cases.filter((item) => item.mode === "live_agent");
+			return core.filter((item) => item.mode === "live_agent");
+		case "comparison":
+			return comparisonCases;
+		case "mechanisms":
+			return mechanismCases;
 		default:
 			throw new Error(`Unknown profile ${profile}`);
 	}

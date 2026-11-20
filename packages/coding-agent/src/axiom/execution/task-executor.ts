@@ -240,11 +240,14 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 	}
 	async initialize(saved?: AdapterCheckpoint, commandCount = 0): Promise<void> {
 		if (!saved) for (const name of ["sources", "runs", "commands", "tmp"]) await mkdir(join(this.root, name));
-		this.original = await readFile(join(this.repo, "examples/tiny-ml-task/model.py"), "utf8");
+		// 仅 v2 审批可选择另一个固定起点。旧任务保持原可信路径与指纹。
+		const startAsset =
+			this.spec.version === 2 && this.spec.starting_model === "shallow_tanh" ? "shallow-tanh.py" : "model.py";
+		this.original = await readFile(join(this.repo, "examples/tiny-ml-task", startAsset), "utf8");
 		this.config = await readFile(join(this.repo, "examples/tiny-ml-task/config.json"), "utf8");
 		for (const path of [
 			...scripts.map((name) => join(this.repo, "examples/tiny-ml-eval", name)),
-			...["model.py", "config.json"].map((name) => join(this.repo, "examples/tiny-ml-task", name)),
+			...[startAsset, "config.json"].map((name) => join(this.repo, "examples/tiny-ml-task", name)),
 			await realpath(this.python),
 		])
 			this.trusted.set(path, sha256(await readFile(path)));

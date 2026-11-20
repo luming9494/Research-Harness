@@ -2,10 +2,13 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import type { TaskCheckpoint } from "../../packages/coding-agent/src/axiom/execution/task-controller.ts";
 import { type BenchCase, selectCases } from "./cases.ts";
+import { schedule, summarize } from "./comparison.ts";
 import { executeCase } from "./execute.ts";
-import { type Grading, grade, independentGrades } from "./grader.ts";
+import { type Grading, grade, independentGrades, liveUsage } from "./grader.ts";
 import { childOutput, type Digest, digest, file, json, save, sha256 } from "./io.ts";
+import type { LiveTrace } from "./live.ts";
 
 const graderAssets = [
 	"axiom/bench/cases.ts",
@@ -14,6 +17,7 @@ const graderAssets = [
 	"axiom/bench/execute.ts",
 	"axiom/bench/io.ts",
 	"axiom/bench/runner.ts",
+	"axiom/bench/comparison.ts",
 	"axiom/bench/live.ts",
 	"axiom/bench/deterministic.ts",
 	"axiom/durable/task-runtime.ts",
@@ -55,7 +59,7 @@ interface Manifest {
 	evidence: Digest[];
 }
 
-interface Result extends Grading {
+export interface Result extends Grading {
 	schema_version: 1;
 	case_id: string;
 	case_version: number;
@@ -73,17 +77,27 @@ export async function runBatch(
 	output: string,
 	cases: readonly BenchCase[],
 	signal: AbortSignal,
+	comparison?: { phase: "pilot" | "formal"; repeats: number },
 ): Promise<{ root: string; results: Result[] }> {
 	const root = join(output, randomUUID());
 	await mkdir(output, { recursive: true });
 	await mkdir(root);
 	const environment = await runtime(repo, python, signal);
-	const results = [];
+	const plan = comparison
+		? schedule(cases, comparison.repeats)
+		: cases.map((item) => ({ item, path: item.id, repetition: 1 }));
+	if (comparison)
+		await json(root, "comparison-plan.json", {
+			...comparison,
+			environment,
+			order: plan.map(({ item, path, repetition }) => ({ item, path, repetition })),
+		});
+	const results: Result[] = [];
 	// 单机串行执行，减少 CPU 噪声，批次目录只含独立运行。
-	for (const item of cases) {
+	for (const { item, path } of plan) {
 		if (signal.aborted) break;
-		const caseRoot = join(root, item.id);
-		await mkdir(caseRoot);
+		const caseRoot = join(root, path);
+		await mkdir(caseRoot, { recursive: true });
 		results.push(await runCase(repo, python, caseRoot, item, environment, signal));
 	}
 	await json(root, "batch.json", {
@@ -92,6 +106,13 @@ export async function runBatch(
 		requested: cases.map((item) => item.id),
 		results,
 	});
+	if (comparison)
+		await json(root, "comparison.json", {
+			schema_version: 1,
+			phase: comparison.phase,
+			interrupted: signal.aborted,
+			groups: summarize(plan, results),
+		});
 	return { root, results };
 }
 
@@ -151,7 +172,7 @@ async function runCase(
 		inputs,
 		evidence,
 	};
-	const result = finalResult(item, manifest, graded);
+	const result = finalResult(item, manifest, graded, await retainedUsage(item, root));
 	await json(root, "manifest.json", manifest);
 	await json(root, "result.json", result);
 	await save(root, "report.md", report(item, manifest, result));
@@ -175,16 +196,26 @@ export async function verifyRun(repo: string, root: string): Promise<Result> {
 	if (JSON.stringify(manifest.evidence) !== JSON.stringify(archived))
 		throw new Error("Benchmark evidence digest mismatch");
 	if (manifest.status === "completed") for (const name of item.evidence) await file(root, name);
-	const result = finalResult(item, manifest, manifest.status === "completed" ? await grade(item, root) : undefined);
+	const result = finalResult(
+		item,
+		manifest,
+		manifest.status === "completed" ? await grade(item, root) : undefined,
+		await retainedUsage(item, root),
+	);
 	if (JSON.stringify(result) !== JSON.stringify(await read(root, "result.json")))
 		throw new Error("Saved result differs from independent score");
 	return result;
 }
 
-function finalResult(item: BenchCase, manifest: Manifest, graded?: Grading): Result {
+function finalResult(
+	item: BenchCase,
+	manifest: Manifest,
+	graded: Grading | undefined,
+	usage: Grading["usage"],
+): Result {
 	const actual = graded ?? {
 		...independentGrades(item, {}, {}),
-		usage: { requests: null, tokens: null, estimated_cost_usd: null },
+		usage,
 		compute_seconds: null,
 		evaluation: [],
 		torch: null,
@@ -210,6 +241,18 @@ function finalResult(item: BenchCase, manifest: Manifest, graded?: Grading): Res
 	};
 }
 
+// 判题缺失不应抹去已归档的真实请求和用量。
+async function retainedUsage(item: BenchCase, root: string): Promise<Grading["usage"]> {
+	if (item.mode !== "live_agent") return liveUsage(undefined);
+	const [observed, state] = await Promise.all([
+		read(root, "observed.json").catch((): undefined => undefined) as Promise<
+			Pick<LiveTrace, "usage" | "admitted"> | undefined
+		>,
+		read(root, "final/ledger.json").catch((): undefined => undefined) as Promise<TaskCheckpoint | undefined>,
+	]);
+	return liveUsage(observed?.usage, state?.requests.length ?? observed?.admitted);
+}
+
 function report(item: BenchCase, manifest: Manifest, result: Result): string {
 	const axis = (label: string, score: Grading["task_success"]): string =>
 		[
@@ -225,6 +268,11 @@ function report(item: BenchCase, manifest: Manifest, result: Result): string {
 		axis("Harness Correctness", result.harness_correctness),
 		`Model requests ${result.usage.requests ?? "unknown"}. Tokens ${result.usage.tokens ?? "unknown"}. Estimated USD ${result.usage.estimated_cost_usd ?? "unknown"}.`,
 		`Wall ${result.wall_seconds.toFixed(3)} s. Worker process time ${result.compute_seconds ?? "unknown"} s.`,
+		...(result.execution
+			? [
+					`Execution ${result.execution.outcome}. Stop ${result.execution.stop_reason ?? "unknown"}. Steps ${result.execution.training_steps}. Training launches ${result.execution.training_launches}. Duplicate launches ${result.execution.duplicate_launches}. Provider overrun ${result.execution.provider_overrun}.`,
+				]
+			: []),
 		"## Failure evidence",
 		result.failures.map((failure) => `- ${failure}`).join("\n") || "- None observed.",
 		"## Independent evaluation",

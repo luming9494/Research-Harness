@@ -1,5 +1,13 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-07.2 真实 Agent 对照验收
+
+Windows 上的 `npm run build:offline`、`npm run check` 和 `npm run test:ml` 均通过。全量 ML 回归为 **105/105**，由 Python 18、Node 70、Pi Session 17 项组成。原有 102 项保留，新增三项覆盖固定对照设计与统计、模型用量准入语义、真实机制负例与 v3 阶段复核。旧版 `core` 的 9 个 Case 均符合预期。
+
+三个对照组共用原生 Pi RPC 和同一独立评分器。27 次正式运行均通过 Harness Correctness。基础改进的 Task Success 为 B0 **2/3**、B1 **3/3**、B2 **3/3**，多轮反馈三组各 **3/3**。中断用例里 B2 **3/3** 恢复原批准任务且 baseline 零重跑，最终 Task Success 为 **1/3**。另两次恢复后候选未通过 AST，只交付已验证的 baseline。B0 与 B1 六次都安全停止且无交付。正式评测记录 88 次请求、198,418 Token、Pi 估算 USD 0.038530752。
+
+五类机制违例由真实运行或实际工件注入产生，判题读取启动回执、预算和独立证据。正常 v3 Case 验证已提交 Proxy 后恢复至 Full，训练预算由 102 续算到 182，独立 Full accuracy 为 0.998046875。[配置、复核命令、所有正式运行和费用](AXIOM_BENCH_COMPARISON.md)
+
 ## WP-07.1 AXIOM-Bench 验收
 
 统一 Runner 的离线批次包含 7 个确定性 T1 和 2 个固定候选真实 CPU T2。九个均符合预期。Task Success 通过 4/9，Harness Correctness 通过 9/9。真实 CPU 恢复用例从 162 步续算至 244 步，独立准确率为 0.998046875。三目标用例交付三个前沿成员，排除一个实测受支配候选。不可达门槛任务在无交付终态下恢复，预算和命令记录一致。改动独立评分文件后复核拒绝。

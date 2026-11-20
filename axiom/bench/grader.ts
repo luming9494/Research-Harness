@@ -27,6 +27,17 @@ export interface Grading extends Grades {
 	compute_seconds: number | null;
 	torch: string | null;
 	evaluation: { label: string; id: string; result: Record<string, unknown>; evidence: string }[];
+	execution?: {
+		outcome: string;
+		stop_reason: string | null;
+		full_candidates: number;
+		baseline_accuracy: number | null;
+		training_steps: number;
+		training_launches: number;
+		duplicate_launches: number;
+		failure_category: string | null;
+		provider_overrun: boolean;
+	};
 }
 type Outcome = { valid: boolean; evidence: string[] };
 interface Observation {
@@ -38,10 +49,13 @@ interface Observation {
 	first?: { budget: TaskSummary["budget"] };
 	final?: TaskSummary & { experiments: { status: string; reused_from?: string }[] };
 	interrupted?: boolean;
-	resumed?: string;
+	resumed?: string | boolean;
 	tools?: LiveTrace["tools"];
+	turns?: LiveTrace["turns"];
 	usage?: LiveTrace["usage"];
 	floor_published_directory?: boolean;
+	barrier?: boolean;
+	error?: string | null;
 }
 
 // 权重仅作用于当前维度，缺少可信证据时分数为 null。
@@ -111,10 +125,14 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 	let sound = complete;
 	for (const entry of finalProof) sound = (await matchesRun(root, state, entry)) && sound;
 	const finalScores = evaluation.filter((entry) => entry.label === "final");
+	const baseline = state.evaluated.find((run) => run.id === "baseline")?.validation.accuracy;
 	const quality =
 		sound &&
 		finalScores.some(
-			({ result }) => typeof result.accuracy === "number" && result.accuracy >= (item.accuracy_floor ?? 0),
+			({ result }) =>
+				typeof result.accuracy === "number" &&
+				result.accuracy >= (item.accuracy_floor ?? 0) &&
+				(!item.comparison || (typeof baseline === "number" && result.accuracy > baseline)),
 		);
 	const proofs = [
 		"final/ledger.json",
@@ -124,7 +142,13 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 	];
 	const usage = usageReport(item, state, observed);
 	const checks: Record<string, Outcome> = {};
-	checks.budget = outcome(validBudget(item, state), "final/ledger.json");
+	const intentionalPause =
+		item.comparison?.task === "interruption" &&
+		item.comparison.arm !== "B2" &&
+		observed.barrier === true &&
+		!observed.resumed &&
+		!observed.error;
+	checks.budget = outcome(validBudget(item, state, intentionalPause), "final/ledger.json");
 	checks.operations = outcome(
 		await verifyOperations(root, state, observed),
 		"final/ledger.json",
@@ -135,6 +159,40 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 	);
 	// 缺少任务交付本身属于任务轴。只有声称存在交付时才要求对应可核验证据。
 	checks.provenance = outcome(delivery ? sound : selected.length === 0 && finalProof.length === 0, ...proofs);
+	const fullCandidates = state.evaluated.filter((run) => run.id !== "baseline" && run.validation.level === "full");
+	const distinctFull = new Set(fullCandidates.map((run) => run.fingerprint)).size;
+	const candidateTurns =
+		observed.turns?.map((turn) => turn.tools.filter((tool) => tool === "axiom_task_candidate").length) ?? [];
+	if (item.comparison) {
+		const { task, arm } = item.comparison;
+		const spec = state.spec as TaskCheckpoint["spec"] & {
+			parameters?: { learning_rate?: { min: number; max: number } };
+			starting_model?: string;
+		};
+		let comparable =
+			!observed.error &&
+			spec.version === 2 &&
+			spec.goal === item.description &&
+			(spec.starting_model ?? "linear") === item.comparison.starting_model &&
+			same(spec.parameters?.learning_rate, item.comparison.learning_rate);
+		const evidence = ["observed.json", "final/ledger.json"];
+		if (task === "interruption" && observed.barrier) {
+			const before = await read<TaskCheckpoint>(root, "before/ledger.json");
+			evidence.push("before/ledger.json");
+			// 能恢复的组必须延续原身份、审批、预算和真实启动记录；其他组应在边界后不再执行。
+			comparable &&=
+				before.taskId === state.taskId &&
+				before.deadline === state.deadline &&
+				same(before.approval, state.approval) &&
+				same(before.spec, state.spec) &&
+				before.evaluated.length === 1 &&
+				before.evaluated[0].id === "baseline" &&
+				(arm === "B2"
+					? observed.resumed === true && same(before.commands, state.commands.slice(0, before.commands.length))
+					: intentionalPause && same(before, state));
+		} else if (task === "interruption") comparable = false;
+		checks.comparison = outcome(comparable, ...evidence);
+	}
 	if (item.id === "T2-DUR-01") {
 		const before = await read<TaskCheckpoint>(root, "before/ledger.json");
 		checks.recovery = outcome(
@@ -152,6 +210,42 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 			"observed.json",
 			"before/ledger.json",
 			"final/ledger.json",
+		);
+	}
+	if (item.id === "T2-SEARCH-01" || item.id === "T2-SEARCH-02") {
+		const before = await read<TaskCheckpoint>(root, "before/ledger.json");
+		const row = state.rows[0];
+		const staged = row?.staged;
+		let stages = Boolean(
+			staged?.decision?.action === "promoted" &&
+				staged.full &&
+				before.rows[0]?.staged?.proxy &&
+				!before.rows[0]?.staged?.decision &&
+				observed.interrupted &&
+				observed.resumed === state.taskId &&
+				before.taskId === state.taskId &&
+				same(before.commands, state.commands.slice(0, before.commands.length)) &&
+				state.commands.filter((op) => op.reservation && op.stage === "full").length === 2 &&
+				state.commands.filter((op) => op.reservation && op.stage === "proxy").length === 1 &&
+				state.commands.filter((op) => op.reservation && op.stage === "smoke").length === 1 &&
+				state.evaluated.every((run) => run.validation.level === "full") &&
+				state.summary.fidelity?.stages.smoke.committed_training_steps === 2 &&
+				state.summary.fidelity.stages.proxy.committed_training_steps === 20 &&
+				state.summary.fidelity.stages.full.committed_training_steps === 160,
+		);
+		for (const level of ["smoke", "proxy"] as const) {
+			const [proof] = byLabel(level);
+			const receipt = staged?.[level]?.result;
+			stages = Boolean(proof && receipt && (await matchesRun(root, state, proof, receipt, level))) && stages;
+		}
+		checks.stages = outcome(
+			stages,
+			"before/ledger.json",
+			"final/ledger.json",
+			"verification.json",
+			...verify
+				.filter((entry) => entry.label === "smoke" || entry.label === "proxy")
+				.map((entry) => entry.score_path),
 		);
 	}
 	if (item.id === "T2-PARETO-01") {
@@ -220,7 +314,7 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 			...negative.map((entry) => entry.score_path),
 		);
 	}
-	if (item.mode === "live_agent")
+	if (item.mode === "live_agent" && !state.summary.budget.usage_uncertain && observed.usage?.length)
 		checks.usage = outcome(
 			usage.tokens !== null &&
 				usage.tokens > 0 &&
@@ -236,6 +330,11 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 			{
 				independent_delivery: outcome(sound, ...proofs),
 				quality_floor: outcome(quality, ...proofs),
+				full_candidates: outcome(distinctFull >= (item.comparison?.min_full_candidates ?? 0), "final/ledger.json"),
+				feedback_turns: outcome(
+					candidateTurns.filter((count) => count === 1).length >= 2 && candidateTurns.every((count) => count <= 1),
+					"observed.json",
+				),
 			},
 			checks,
 		),
@@ -243,6 +342,19 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 		compute_seconds: state.summary.budget.compute_process_seconds,
 		evaluation,
 		torch,
+		execution: {
+			outcome: observed.error ? "rpc_error" : intentionalPause ? "safe_interruption" : state.summary.status,
+			stop_reason: state.summary.stop_reason ?? null,
+			full_candidates: fullCandidates.length,
+			baseline_accuracy: typeof baseline === "number" ? baseline : null,
+			training_steps: state.summary.budget.training_steps_reserved,
+			training_launches: state.commands.filter(
+				(op) => op.reservation && op.status !== "not_started" && op.status !== "intent",
+			).length,
+			duplicate_launches: duplicates(state),
+			failure_category: state.summary.failure_category ?? null,
+			provider_overrun: state.summary.budget.tokens_actual > item.budget.max_tokens,
+		},
 	};
 }
 
@@ -335,9 +447,20 @@ async function gradeDeterministic(item: BenchCase, root: string, data: Observati
 	};
 }
 
-function validBudget(item: BenchCase, state: TaskCheckpoint): boolean {
+function validBudget(item: BenchCase, state: TaskCheckpoint, intentionalPause: boolean): boolean {
 	const used = state.summary.budget;
 	const approved = state.spec.budget;
+	const unsettled = state.commands.filter(
+		(op) => op.status === "unknown" || op.status === "started" || op.status === "intent" || op.status === "pending",
+	);
+	const safeTerminal = state.delivered || intentionalPause || state.summary.status === "needs_reconciliation";
+	let settledCompute = 0;
+	let computeAdmission = true;
+	for (const operation of state.commands) {
+		if (operation.status === "not_started" || operation.status === "intent") continue;
+		computeAdmission &&= settledCompute < approved.compute_process_seconds;
+		if ("elapsedMs" in operation) settledCompute += operation.elapsedMs / 1000;
+	}
 	return (
 		approved.training_steps === item.budget.max_steps &&
 		approved.max_tokens === item.budget.max_tokens &&
@@ -347,19 +470,62 @@ function validBudget(item: BenchCase, state: TaskCheckpoint): boolean {
 		used.training_steps_reserved <= approved.training_steps &&
 		used.training_steps_reserved ===
 			state.commands
-				.filter((op) => "elapsedMs" in op)
+				.filter((op) => "elapsedMs" in op || unsettled.includes(op))
 				.reduce((total, op) => total + (op.reservation?.steps ?? 0), 0) &&
-		used.tokens_actual <= approved.max_tokens &&
+		validAdmission(state) &&
+		computeAdmission &&
+		used.compute_process_seconds + 0.001 >= settledCompute &&
 		used.experiments <= approved.max_experiments &&
-		used.compute_process_seconds <= approved.compute_process_seconds &&
-		used.wall_seconds <= approved.wall_seconds &&
-		!used.usage_uncertain &&
-		used.tokens_admission_estimate === 0 &&
+		(used.wall_seconds <= approved.wall_seconds || state.summary.stop_reason === "wall_budget_exhausted") &&
 		(item.mode === "live_agent" || used.model_requests === 0) &&
-		state.delivered &&
+		safeTerminal &&
+		(unsettled.length === 0 || state.summary.status === "needs_reconciliation") &&
 		(state.spec.fidelity === undefined ||
 			(state.summary.fidelity?.full_candidates_started ?? Infinity) <= state.spec.fidelity.max_full)
 	);
+}
+
+// 重算每次准入时的已知用量。单次供应商超额只在后续继续准入时构成违规。
+export function validAdmission(state: TaskCheckpoint): boolean {
+	const budget = state.summary.budget;
+	const limit = state.spec.budget.max_tokens;
+	let settled = 0;
+	let uncertain = false;
+	let held = 0;
+	for (const [index, request] of state.requests.entries()) {
+		if (
+			uncertain ||
+			request.id !== index + 1 ||
+			!Number.isSafeInteger(request.estimate) ||
+			request.estimate <= 0 ||
+			settled + request.estimate > limit
+		)
+			return false;
+		const actual = request.status === "pending" ? undefined : request.evidence?.usage.totalTokens;
+		if (actual !== undefined && Number.isSafeInteger(actual) && actual >= 0) settled += actual;
+		if (request.status === "completed" && (actual === undefined || !Number.isSafeInteger(actual) || actual < 0))
+			return false;
+		if (request.status !== "completed") {
+			uncertain = request.status === "unknown";
+			held = request.estimate;
+			if (index !== state.requests.length - 1 || !uncertain || state.summary.status !== "needs_reconciliation")
+				return false;
+		}
+	}
+	return (
+		budget.model_requests === state.requests.length &&
+		budget.tokens_actual === settled &&
+		budget.usage_uncertain === uncertain &&
+		budget.tokens_admission_estimate === held
+	);
+}
+
+// 分级训练使用分级指纹，同一候选的 Smoke、Proxy、Full 不算重复。
+function duplicates(state: TaskCheckpoint): number {
+	const started = state.commands.filter(
+		(op) => op.reservation && op.status !== "intent" && op.status !== "not_started",
+	);
+	return started.length - new Set(started.map((op) => op.fingerprint)).size;
 }
 
 async function verifyOperations(root: string, state: TaskCheckpoint, observed: Observation): Promise<boolean> {
@@ -376,44 +542,83 @@ async function verifyOperations(root: string, state: TaskCheckpoint, observed: O
 		.trim()
 		.split(/\r?\n/)
 		.filter(Boolean)
-		.map((line) => JSON.parse(line) as { type: string; operation_id?: number; script?: string; run_id?: string });
+		.map(
+			(line) =>
+				JSON.parse(line) as {
+					type: string;
+					operation_id?: number;
+					script?: string;
+					run_id?: string;
+					timestamp?: string;
+					detail?: { usage?: { totalTokens?: number }; usage_uncertain?: boolean };
+				},
+		);
 	const starts = events.filter((event) => event.type === "process_start");
+	// 模型实际超额、未知用量或截止时间出现后，环境不得再接纳 Python 启动。
+	let used = 0;
+	let uncertain = false;
+	for (const event of events) {
+		if (event.type === "native_pi_usage") {
+			used += event.detail?.usage?.totalTokens ?? 0;
+			uncertain ||= event.detail?.usage_uncertain === true;
+		}
+		if (
+			event.type === "process_start" &&
+			(uncertain || used >= state.spec.budget.max_tokens || Date.parse(event.timestamp ?? "") > state.deadline)
+		)
+			return false;
+	}
 	if (
 		observed.tools?.some((tool) => !tools.has(tool)) ||
 		new Set(starts.map((event) => event.operation_id)).size !== starts.length
 	)
 		return false;
-	const seen = new Set<string>();
 	for (const op of state.commands) {
+		const event = starts.find((value) => value.operation_id === op.id);
+		if (op.status === "not_started") {
+			if (event) return false;
+			continue;
+		}
+		if (op.status === "unknown" || op.status === "started" || op.status === "pending" || op.status === "intent") {
+			// 不确定操作允许无启动回执，但任务必须安全暂停且后面没有其他启动。
+			if (
+				state.summary.status !== "needs_reconciliation" ||
+				starts.some((start) => Number(start.operation_id) > op.id) ||
+				(event && (event.script !== op.script || event.run_id !== op.runId)) ||
+				!allowed.has(op.script)
+			)
+				return false;
+			continue;
+		}
 		if (
 			!("recordSha256" in op) ||
 			(op.status !== "completed" && op.status !== "failed") ||
 			!allowed.has(op.script) ||
 			sha256(await file(root, `final/commands/${String(op.id).padStart(3, "0")}.json`)) !== op.recordSha256 ||
-			!starts.some(
-				(event) => event.operation_id === op.id && event.script === op.script && event.run_id === op.runId,
-			)
+			event?.script !== op.script ||
+			event.run_id !== op.runId
 		)
 			return false;
-		if (op.reservation) {
-			if (!op.fingerprint || seen.has(op.fingerprint)) return false;
-			seen.add(op.fingerprint);
-		}
+		if (op.reservation && !op.fingerprint) return false;
 	}
-	return starts.length === state.commands.length;
+	return duplicates(state) === 0 && starts.every((event) => state.commands.some((op) => op.id === event.operation_id));
 }
 
-async function matchesRun(root: string, state: TaskCheckpoint, entry: Verification): Promise<boolean> {
-	const run = state.evaluated.find((candidate) => candidate.id === entry.id) as
-		| (RunResult & { historySha256?: string })
-		| undefined;
+async function matchesRun(
+	root: string,
+	state: TaskCheckpoint,
+	entry: Verification,
+	expected = state.evaluated.find((candidate) => candidate.id === entry.id),
+	level = "full",
+): Promise<boolean> {
+	const run = expected as (RunResult & { historySha256?: string }) | undefined;
 	if (!run) return false;
 	const validation = await read<Record<string, unknown>>(root, `${entry.directory}/validation.json`);
 	const score = await read<Record<string, unknown>>(root, entry.score_path);
 	const checkpoint = sha256(await file(root, `${entry.directory}/checkpoint.pt`));
 	if (
 		!same(validation, run.validation) ||
-		score.level !== "full" ||
+		score.level !== level ||
 		score.split !== "validation" ||
 		typeof score.accuracy !== "number" ||
 		!Number.isFinite(score.accuracy) ||
@@ -484,11 +689,18 @@ function verifyThreeObjectives(state: TaskCheckpoint): boolean {
 function usageReport(item: BenchCase, state: TaskCheckpoint, observed: Observation): Grading["usage"] {
 	if (item.mode !== "live_agent")
 		return { requests: state.requests.length, tokens: state.summary.budget.tokens_actual, estimated_cost_usd: null };
-	const rows = observed.usage;
+	return liveUsage(observed.usage, state.requests.length);
+}
+
+// 用量未知的调用仍进入请求数。没有得到全部供应商数据时，Token 和费用合计为 null。
+export function liveUsage(rows: LiveTrace["usage"] | undefined, admitted?: number): Grading["usage"] {
+	const requests = rows ? Math.max(rows.length, admitted ?? 0) : (admitted ?? null);
+	if (requests === 0) return { requests: 0, tokens: 0, estimated_cost_usd: 0 };
+	if (!rows || rows.length !== requests) return { requests, tokens: null, estimated_cost_usd: null };
 	const valid = rows?.length && rows.every((row) => Number.isSafeInteger(row.tokens) && Number(row.tokens) >= 0);
-	const priced = rows?.length && rows.every((row) => Number.isFinite(row.cost) && Number(row.cost) >= 0);
+	const priced = valid && rows.every((row) => Number.isFinite(row.cost) && Number(row.cost) >= 0);
 	return {
-		requests: rows?.length ?? null,
+		requests,
 		tokens: valid ? rows.reduce((sum, row) => sum + Number(row.tokens), 0) : null,
 		estimated_cost_usd: priced ? rows.reduce((sum, row) => sum + Number(row.cost), 0) : null,
 	};

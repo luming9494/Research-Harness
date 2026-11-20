@@ -20,7 +20,8 @@ AXIOM 是面向自主科研的自进化 Agent Harness。机器学习是首个场
 | WP-06.1 | 通用实验内核接入 Tiny CPU、审批限制下的学习率搜索和第二个测试适配器，独立静态审阅已通过。[实验内核](AXIOM_EXPERIMENT_ENGINE.md) | 保留 v1/v2 兼容回归 |
 | WP-06.2 | v3 分级评估、保守剪枝、分段记账与恢复，独立静态审阅已通过。[多保真评估](AXIOM_MULTI_FIDELITY.md) | 保留分级与恢复回归 |
 | WP-06.3 | v4 独立多目标评分、Pareto 前沿、按偏好交付和证据引用，独立静态审阅已通过。[Pareto 优化](AXIOM_PARETO.md) | 保留持久化回归 |
-| WP-07.1 | AXIOM-Bench 统一 CLI、独立双轴判题和证据复核。[基础评测框架](AXIOM_BENCH.md) | 等待独立代码审阅 |
+| WP-07.1 | AXIOM-Bench 统一 CLI、独立双轴判题和证据复核。[基础评测框架](AXIOM_BENCH.md) | 阶段性通过独立静态审阅 |
+| WP-07.2 | 同一 Runner 支持 B0/B1/B2 真实模型对照、分组统计和新增 CPU 机制判题。[真实对照](AXIOM_BENCH_COMPARISON.md) | 等待独立审阅 |
 | 后续 | 规划中 | 第二类 AI 任务、跨任务评测、Ablate、Reproduce 和远程 GPU Runner |
 
 ## 两个优化循环

@@ -74,6 +74,8 @@ const current = Type.Object(
 			{ additionalProperties: false },
 		),
 		parameters: Type.Optional(parameterRanges),
+		// 主机在审批时选择固定起点，搜索工具不能改写该字段。
+		starting_model: Type.Optional(Type.Literal("shallow_tanh")),
 		max_revisions: Type.Integer({ minimum: 0, maximum: 3 }),
 	},
 	{ additionalProperties: false },
@@ -83,6 +85,7 @@ const staged = Type.Object(
 	{
 		...current.properties,
 		version: Type.Literal(3),
+		starting_model: Type.Optional(Type.Never()),
 		budget: Type.Object(
 			{
 				...common.budget.properties,

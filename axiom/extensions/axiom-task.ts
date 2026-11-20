@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { BudgetStop } from "../../packages/coding-agent/src/axiom/execution/task-budget.ts";
-import { TaskController } from "../../packages/coding-agent/src/axiom/execution/task-controller.ts";
-import { DEFAULT_BUDGET, parameterProposalSchema, TASK_RULES, validateTaskSpec } from "../../packages/coding-agent/src/axiom/execution/task-spec.ts";
+import { type TaskApproval, TaskController } from "../../packages/coding-agent/src/axiom/execution/task-controller.ts";
+import { DEFAULT_BUDGET, parameterProposalSchema, TASK_RULES, type TaskSpec, validateTaskSpec } from "../../packages/coding-agent/src/axiom/execution/task-spec.ts";
 import { openExperimentLedger } from "../durable/experiment-ledger.ts";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
@@ -20,9 +20,17 @@ const tools = [
 ] as const;
 const names = tools.map(tool => `axiom_task_${tool.name}`);
 
+// 受信任的评测入口可替换任务控制器，但仍走原生会话、工具约束、审批和用量事件。
+export type TaskSession = Pick<TaskController, "root" | "budget" | "stopped" | "stop" | "snapshot" | "invoke" | "checkpoint" | "reserveRequest" | "recordUsage" | "markUsageUnknown" | "closeLedger">;
+interface TaskHost {
+  comparison?: true;
+  create?(repo: string, python: string, spec: TaskSpec, abort: () => void, approval: TaskApproval): Promise<TaskSession>;
+  afterTool?(name: typeof tools[number]["name"], notify: () => void): Promise<void>;
+}
+
 /** Registers multi-round tools without creating a Pi session or wrapping model requests. */
-export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolean) {
-  let task: TaskController | undefined;
+export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolean, host: TaskHost = {}): { isActive: () => boolean } {
+  let task: TaskSession | undefined;
   let active = false;
   let prior: string[] = [];
   let registered = false;
@@ -55,7 +63,9 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
     }
   });
   pi.on("before_agent_start", event => {
-    if (active) event.systemPromptOptions.sections.axiom_task = "Trusted Tiny Task Optimize: inspect, run baseline, then propose candidates from independent validation feedback. Only include learning_rate if approved. In v3/v4 give a hypothesis and cite observed feedback. In v4 supply evidence_refs with prior IDs and use the Pareto frontier to explore quality and model-size trade-offs. The host decides advancement and delivery, and only Full scores are official. No final-test, arbitrary shell, file edits or reference implementation access.";
+    if (active) event.systemPromptOptions.sections.axiom_task = host.comparison
+      ? "Trusted Tiny CPU task: inspect, obtain the baseline and submit candidates using independent validation results. Supply content and rationale, with optional parameters.learning_rate within the approved bounds. The host commits delivery. No final-test, shell or external data."
+      : "Trusted Tiny Task Optimize: inspect, run baseline, then propose candidates from independent validation feedback. Only include learning_rate if approved. In v3/v4 give a hypothesis and cite observed feedback. In v4 supply evidence_refs with prior IDs and use the Pareto frontier to explore quality and model-size trade-offs. The host decides advancement and delivery, and only Full scores are official. No final-test, arbitrary shell, file edits or reference implementation access.";
   });
   pi.on("context_with_system", async (event, ctx) => {
     if (!active || !task) return;
@@ -70,6 +80,8 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       // Native full transcript includes active tool schemas. This is admission headroom, not an output cap.
       const estimate = Buffer.byteLength(JSON.stringify(event.messages), "utf8") + 8192 + 2048;
       await task.reserveRequest(estimate);
+      // RPC 用宿主回执识别请求，预算拒绝生成的合成中止消息不计作真实调用。
+      if (host.comparison) ctx.ui.notify("Benchmark model admission committed", "info");
     } catch (error) {
       ctx.abort();
       await task.stop(error instanceof BudgetStop ? error.reason : "execution_failure");
@@ -89,7 +101,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
   });
 
   // 新建与恢复共用工具注册和权限设置；终态恢复仅报告证据并释放所有权。
-  const activate = async (controller: TaskController, ctx: ExtensionCommandContext): Promise<void> => {
+  const activate = async (controller: TaskSession, ctx: ExtensionCommandContext): Promise<void> => {
       const status = controller.snapshot();
       if (controller.stopped) {
         await controller.closeLedger();
@@ -98,12 +110,25 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       }
       task = controller;
       if (!registered) {
-        for (const tool of tools) pi.registerTool({
-          name: `axiom_task_${tool.name}`, label: `AXIOM ${tool.name}`, description: tool.description,
-          defaultActive: false, executionMode: "sequential", parameters: tool.parameters,
+        for (const tool of tools) {
+          // 三组共用版本精确的接口，v2 将反馈写进 rationale。
+          const comparisonCandidate = host.comparison && tool.name === "candidate";
+          pi.registerTool({
+          name: `axiom_task_${tool.name}`, label: `AXIOM ${tool.name}`,
+          description: comparisonCandidate
+            ? "Submit one complete legal model.py and an evidence-based rationale. Only nn.Linear/Sequential/ReLU/Tanh, literal dimensions, 2 inputs/outputs, <=1024 parameters. Optionally set parameters.learning_rate in the approved range."
+            : host.comparison && tool.name === "finish"
+              ? "Stop experiments and publish the selected independently validated checkpoint."
+              : host.comparison && tool.name === "inspect"
+                ? "Read immutable task rules and input assets, available validation metrics and remaining budget."
+                : tool.description,
+          defaultActive: false, executionMode: "sequential",
+          parameters: comparisonCandidate ? Type.Pick(tools[2].parameters, ["content", "rationale", "parameters"]) : tool.parameters,
           async execute(_id, params, signal) {
             if (!active || !task) throw new Error("Start /axiom-task first");
             const result = await task.invoke(tool.name, params as Record<string, unknown>, signal);
+            // 仅在工作已提交、模型尚未收到结果时开放宿主的中断同步点。
+            if (tool.name === "baseline" && result.baseline) await host.afterTool?.(tool.name, () => ctx.ui.notify("Benchmark barrier: baseline committed", "info"));
             // 给模型保留指标和决策，完整阶段凭证与候选快照留在任务目录。
             const feedback = result.fidelity ? { ...result, experiments: result.experiments.map(({ staged, ...row }) => ({
               ...row, ...(staged ? {
@@ -115,7 +140,8 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
             })) } : result;
             return { content: [{ type: "text", text: JSON.stringify(feedback) }], details: feedback, terminate: task.stopped, isError: result.status === "failed" || (tool.name === "candidate" && result.failure_category !== undefined) };
           },
-        });
+          });
+        }
         registered = true;
       }
       prior = pi.getActiveTools();
@@ -145,10 +171,11 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       if (!ctx.hasUI) throw new Error("Task requires interactive approval");
       const spec = validateTaskSpec(args.trim() ? JSON.parse(args) as unknown : { version: 1, task: "tiny-xor-v1", goal: "Improve Tiny XOR validation accuracy within approved budgets", target_accuracy: null, rules: TASK_RULES, budget: DEFAULT_BUDGET });
       if (!await ctx.ui.confirm("AXIOM multi-round Tiny Task", `${JSON.stringify(spec, null, 2)}\nAllow local CPU experiments? Chat uses the selected Pi model and may incur fees. Token admission is estimated, not an absolute provider billing cap.`)) return;
-      const controller = await TaskController.create(repo, pythonPath(), spec, () => ctx.abort(), {
-        open: openExperimentLedger,
-        approval: { approvedAt: new Date().toISOString(), sessionId: ctx.sessionManager.getSessionId() },
-      });
+      const approval = { approvedAt: new Date().toISOString(), sessionId: ctx.sessionManager.getSessionId() };
+      // 三组共用原始审批，生产入口默认使用 Durable 控制器。
+      const controller = host.create
+        ? await host.create(repo, pythonPath(), spec, () => ctx.abort(), approval)
+        : await TaskController.create(repo, pythonPath(), spec, () => ctx.abort(), { open: openExperimentLedger, approval });
       await activate(controller, ctx);
     },
   });
@@ -157,6 +184,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
     handler: async (args, ctx): Promise<void> => {
       await ctx.waitForIdle();
       if (active || tinyActive()) { ctx.ui.notify("Stop the current AXIOM mode before resuming another task.", "warning"); return; }
+      if (host.create) throw new Error("This comparison arm does not implement task recovery");
       // 原审批随账本恢复；本命令本身不会发模型请求。
       await activate(await TaskController.resume(repo, pythonPath(), args.trim(), openExperimentLedger, () => ctx.abort()), ctx);
     },

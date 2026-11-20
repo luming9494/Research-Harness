@@ -35,7 +35,9 @@ WP-06.2 接入 L0 至 L3、顺序筛选、Full 配额、分阶段预算与 Durab
 
 WP-06.3 接入 v4，多目标任务用准确率与独立参数量评分，可选 loss。前沿和交付偏好独立，恢复从已核验的 Full 历史重建前沿。暂未校准的多目标代理采用直接 Full，后续生产 RAG 适配仍独立验收。[Pareto 优化](AXIOM_PARETO.md)
 
-WP-07.1 交付版本化用例、统一 Runner、Task Success / Harness Correctness 独立判题、证据归档与复核。首批包括 7 个 T1、2 个固定 CPU T2 和 1 个真实模型 T3。WP-07.2 可基于同一证据协议扩展分组对照和重复运行。[AXIOM-Bench](AXIOM_BENCH.md)
+WP-07.1 交付版本化用例、统一 Runner、Task Success / Harness Correctness 独立判题、证据归档与复核。首批包括 7 个 T1、2 个固定 CPU T2 和 1 个真实模型 T3。[AXIOM-Bench](AXIOM_BENCH.md)
+
+WP-07.2 扩展 6 个 CPU 机制用例和 9 个 B0/B1/B2 对照配置。固定每个任务的模型、起点、预算和评分器，按任务及组别登记重复、失败、恢复、资源和费用。结果仅覆盖可信 Tiny CPU。后续可沿用每项失败与原证据的对应关系扩展归因。[真实 Agent 对照](AXIOM_BENCH_COMPARISON.md)
 
 付费模型 API 按 [AXIOM 长期开发规范](../AGENTS.md#axiom-模型-api-使用规范)使用。真实模型验收和确定性回归分别留证。
 - **实现搜索。** 起步沿用可信 Tiny CPU 的模型结构约束，再增加由 TaskSpec 审批的超参数白名单和取值范围，分别验证结构与学习率等参数的搜索。每轮记录假设、支持假设的上一轮证据、候选差异和下一步决策。候选依次经过静态校验、Smoke、低成本 Proxy 和完整评估，记录去重、剪枝、晋级理由及每阶段成本。只用完整独立评估进入最终 Pareto 集，计算质量与执行成本的取舍，按用户偏好选交付物。

@@ -23,7 +23,8 @@ AXIOM 是面向自主科研的自进化 Agent Harness。机器学习是首个场
 | WP-07.1 | AXIOM-Bench 统一 CLI、独立双轴判题和证据复核。[基础评测框架](AXIOM_BENCH.md) | 阶段性通过独立静态审阅 |
 | WP-07.2 | 同一 Runner 支持 B0/B1/B2 真实模型对照、分组统计和新增 CPU 机制判题。[真实对照](AXIOM_BENCH_COMPARISON.md) | 已通过独立静态审阅 |
 | WP-07.3 | Bench 为每次运行派生可复核 Trace 和失败归因，保留复跑 Case 与历史评分。[失败归因](AXIOM_FAILURE_ATTRIBUTION.md) | 已通过独立静态源码审阅 |
-| WP-08.1 | 可选的四层上下文、Durable 重建、证据筛选与受控工件窗口，已完成 Pi 跨进程对照。[上下文与真实对照](AXIOM_CONTEXT_ENGINEERING.md) | 等待独立审阅 |
+| WP-08.1 | 可选的四层上下文、Durable 重建、证据筛选与受控工件窗口，已完成 Pi 跨进程对照。[上下文与真实对照](AXIOM_CONTEXT_ENGINEERING.md) | 已通过独立静态源码审阅 |
+| WP-08.2 | 策略白名单与 Durable 身份绑定、Benchmark 本地观测导出、原生 Compaction 恢复。Docker 验收入口独立提供，运行时验证待补。[策略治理](AXIOM_POLICY_GOVERNANCE.md) · [隔离与观测](AXIOM_SANDBOX_OBSERVABILITY.md) | 等待独立审阅 |
 | 后续 | 规划中 | 第二类 AI 任务、跨任务评测、Ablate、Reproduce 和远程 GPU Runner |
 
 ## 两个优化循环

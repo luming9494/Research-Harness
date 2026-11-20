@@ -42,7 +42,9 @@ test("CTX-081-01 deterministic clipping retains approval, recovery and a digest-
 	assert.equal(window.critical.recovery, true);
 	assert.equal(window.critical.deadline_ms, 123456);
 	assert.equal(window.critical.approval.sha256, sha256(JSON.stringify(approval)));
-	assert.deepEqual(window.critical.spec, task);
+	const { goal, ...trustedSpec } = task;
+	assert.deepEqual(window.critical.spec, trustedSpec);
+	assert.equal(window.critical.goal_sha256, sha256(goal));
 	assert.equal(window.critical.unconfirmed[0].id, 5);
 	assert.match(window.critical.latest_failure.reason, /build_model/);
 	assert.doesNotMatch(JSON.stringify(window), /SYSTEM OVERRIDE|never copy session/);

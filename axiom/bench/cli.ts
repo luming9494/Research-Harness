@@ -1,9 +1,11 @@
 // 命令行只允许选择主机内置 Case，缺省入口不发起付费请求。
+import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { cases, selectCases } from "./cases.ts";
 import { attributeArchive, runBatch, verifyRun } from "./runner.ts";
+import { sandboxSmoke } from "./sandbox.ts";
 
 async function main(): Promise<void> {
 	const repo = fileURLToPath(new URL("../../", import.meta.url));
@@ -14,6 +16,7 @@ async function main(): Promise<void> {
 			out: { type: "string" },
 			verify: { type: "string" },
 			attribute: { type: "string" },
+			sandbox: { type: "string" },
 			list: { type: "boolean" },
 			phase: { type: "string" },
 			repeats: { type: "string" },
@@ -23,11 +26,38 @@ async function main(): Promise<void> {
 	});
 	if (values.help) {
 		console.log(
-			"npm run bench:axiom -- [--profile core|smoke|live|comparison|mechanisms|trace|context | --case ID ...] [--out DIR] [--list]\n" +
+			"npm run bench:axiom -- [--profile core|smoke|live|comparison|mechanisms|trace|context|governance | --case ID ...] [--out DIR] [--list]\n" +
 				"npm run bench:axiom -- --profile comparison --phase pilot|formal [--repeats N]\n" +
 				"npm run bench:axiom -- --verify <case-run-directory>\n" +
-				"npm run bench:axiom -- --attribute <case-run-directory> [--out EXISTING-DIR]",
+				"npm run bench:axiom -- --attribute <case-run-directory> [--out EXISTING-DIR]\n" +
+				"npm run bench:axiom -- --sandbox <image@sha256:digest> [--out DIR]",
 		);
+		return;
+	}
+	if (values.sandbox !== undefined) {
+		// 隔离入口由操作者调用，不接受模型指令、候选路径或任意 Docker 参数。
+		if (
+			values.verify ||
+			values.attribute ||
+			values.profile ||
+			values.case ||
+			values.list ||
+			values.phase ||
+			values.repeats
+		)
+			throw new Error("--sandbox only accepts --out");
+		const out = resolve(values.out ?? join(repo, "private", "axiom-sandbox"));
+		await mkdir(out, { recursive: true });
+		const python = resolve(
+			process.env.AXIOM_PYTHON ??
+				join(repo, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python"),
+		);
+		const docker =
+			process.env.AXIOM_DOCKER ??
+			(process.platform === "win32"
+				? "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe"
+				: "/usr/bin/docker");
+		console.log(JSON.stringify({ root: await sandboxSmoke(repo, docker, python, values.sandbox, out) }));
 		return;
 	}
 	if (values.attribute) {

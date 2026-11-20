@@ -1,5 +1,13 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-08.2 策略治理、隔离与观测验收
+
+真实 DeepSeek Flash 用例 `T3-GOV-01` 通过 Task Success 和 Harness Correctness，均为 100，`--verify` 一致。Pi 原生 Compaction 记录 44,016 Token，强制退出后用原任务 ID 和版本 2 继续。训练步数从 160 结算到 240，累计 3 次启动、0 次重复，最终候选验证准确率 `0.998046875`、参数量 22。实调 10 次，实际输入 76,254 Token，总计 78,178 Token，Pi 估算 USD `0.02349156`。Windows 缺少 Docker，已验证入口拒绝启动，真实容器验收待补。[独立复核命令、账本及证据摘要](AXIOM_SANDBOX_OBSERVABILITY.md)
+
+`npm run build:offline`、`npm run check` 和 WP-08.2 定向测试 **5/5** 通过。首次 `npm run test:ml` 中 Python **18/18**、Node **83/84**，`BENCH-072-03` 的机制组在并行执行中触发既有 540 秒超时，最后一项 `T2-SEARCH-02` 未完成，脚本在进入 Pi Session 测试前退出。单独运行 `node --test tests/axiom/bench-comparison.test.mjs` 后 **3/3** 通过，含 6 个机制用例及其独立复核，整组 467.04 秒。超时、评分阈值及回归覆盖保持原设置。
+
+在 `packages/coding-agent` 执行 `node ../../node_modules/vitest/dist/cli.js --run test/suite/axiom-tiny.test.ts test/suite/axiom-task.test.ts`，Pi Session **17/17** 通过。合并首轮与隔离复跑，回归覆盖 **119/119** 项，其中 Python 18、Node 84、Pi Session 17。首轮全量命令的超时单独保留在验收记录中。
+
 ## WP-08.1 四层上下文与恢复验收
 
 DeepSeek Flash 的真实 Baseline / Enhanced 对照各完成 1/1，任务和机制双轴均为 100。两组在 AST 拒绝后提交合法修订，强制退出 Pi 后恢复各自原任务与首轮结果，训练步从 162 续算到 244，已核验训练零重跑。Enhanced 窗口复原任务审批、截止、当前最佳和具体拒绝原因。两组最终独立准确率均为 **0.998046875**。

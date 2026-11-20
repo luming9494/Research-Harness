@@ -5,6 +5,7 @@ import type { EvidenceReference, TraceEvidence } from "./trace-evidence.ts";
 import type { PiToolReceipt } from "./trace-rpc.ts";
 
 export interface TraceRun {
+	trace_schema_version?: 1 | 2;
 	case_id: string;
 	run_id: string;
 	started_at: string;
@@ -19,6 +20,9 @@ export interface TraceEvent {
 	run_id: string;
 	task_id: string | null;
 	policy_version: number | null;
+	policy_id?: string;
+	harness_policy_version?: number;
+	policy_sha256?: string;
 	type: string;
 	status: string;
 	timestamp: string | null;
@@ -62,6 +66,7 @@ interface Observation {
 	interrupted?: boolean;
 	barrier?: boolean;
 	resumed?: boolean | string;
+	compaction?: { source: string; tokens_before: number };
 	rejected?: string;
 	commands?: string[];
 	final?: TaskCheckpoint["summary"];
@@ -88,11 +93,21 @@ export async function collectTrace(run: TraceRun, store: TraceEvidence, grade: G
 			run_id: run.run_id,
 			task_id: saved?.taskId ?? null,
 			policy_version: saved?.spec.version ?? null,
+			policy_id: saved?.policy?.config.id,
+			harness_policy_version: saved?.policy?.config.version,
+			policy_sha256: saved?.policy?.sha256,
 			timestamp: timestamp && Number.isFinite(Date.parse(timestamp)) ? timestamp : null,
 			...fields,
 		});
 	};
 	emit("run/start", { type: "run", status: "started", evidence: [] }, run.started_at);
+	// 原生压缩回执只以已核验的观测位置进入轨迹。
+	if (observation?.value.compaction?.source === "axiom-ledger")
+		emit("native/compaction", {
+			type: "compaction",
+			status: "completed",
+			evidence: [observation.ref("/compaction")],
+		});
 
 	// 新运行有原生工具首尾收据。历史仅有工具启动名，未知返回保持缺失。
 	const proposals = new Map<string, PiToolReceipt[]>();

@@ -24,6 +24,7 @@ import {
 	type WorkerOperation,
 } from "./experiment-domain.ts";
 import { decidePromotion, type PromotionDecision } from "./fidelity-policy.ts";
+import { type PolicyBinding, verifyPolicy } from "./harness-policy.ts";
 import { chooseParetoDelivery, paretoFrontier, paretoPoint } from "./pareto.ts";
 import { type BudgetReason, BudgetStop, TaskBudget } from "./task-budget.ts";
 import { tinyEvaluation, tinyExperimentDomain } from "./task-executor.ts";
@@ -131,6 +132,7 @@ export interface TaskCheckpoint {
 	spec: ExperimentTaskSpec;
 	domain?: { id: string; version: number };
 	approval: TaskApproval;
+	policy?: PolicyBinding;
 	deadline: number;
 	savedAt?: number;
 	summary: TaskSummary;
@@ -196,6 +198,7 @@ export class TaskController {
 		ledger: TaskLedger;
 		executor: DurableExperimentAdapter;
 		approval: TaskApproval;
+		policy?: PolicyBinding;
 		deadline: number;
 		domain: { id: string; version: number };
 	};
@@ -226,7 +229,7 @@ export class TaskController {
 		python: string,
 		input: unknown,
 		onStop: () => void,
-		durable?: { open: OpenTaskLedger; approval: TaskApproval },
+		durable?: { open: OpenTaskLedger; approval: TaskApproval; policy?: PolicyBinding },
 		domain: ExperimentDomain = tinyExperimentDomain,
 	): Promise<TaskController> {
 		const spec = domain.validateSpec(input);
@@ -244,7 +247,14 @@ export class TaskController {
 		const ledger = await durable?.open(root);
 		try {
 			if (ledger && durable)
-				task.attach(ledger, executor, durable.approval, Date.now() + budget.remainingWallMs, domain);
+				task.attach(
+					ledger,
+					executor,
+					durable.approval,
+					Date.now() + budget.remainingWallMs,
+					domain,
+					durable.policy,
+				);
 			await task.initialize();
 		} catch (error) {
 			await ledger?.close();
@@ -290,7 +300,7 @@ export class TaskController {
 			for (const command of saved.commands) if ("recordSha256" in command) await executor.verifyCommand(command);
 			const task = new TaskController(root, spec, budget, executor, onStop);
 			if (spec.fidelity && !executor.fidelity) throw new Error("Missing durable stage adapter");
-			task.attach(ledger, executor, saved.approval, saved.deadline, domain);
+			task.attach(ledger, executor, saved.approval, saved.deadline, domain, saved.policy);
 			task.commands = saved.commands;
 			task.requests = saved.requests;
 			task.rows = saved.rows;
@@ -433,8 +443,17 @@ export class TaskController {
 		approval: TaskApproval,
 		deadline: number,
 		domain: ExperimentDomain,
+		policy?: PolicyBinding,
 	): void {
-		this.persistence = { ledger, executor, approval, deadline, domain: { id: domain.id, version: domain.version } };
+		// 策略随批准任务快照存储，旧账本保留原默认行为。
+		this.persistence = {
+			ledger,
+			executor,
+			approval,
+			deadline,
+			policy: policy ? verifyPolicy(policy) : undefined,
+			domain: { id: domain.id, version: domain.version },
+		};
 		executor.recordCommand = async (operation): Promise<void> => {
 			this.commands[operation.id - 1] = operation;
 			await this.commitLedger();
@@ -485,15 +504,24 @@ export class TaskController {
 	// 只读投影由当前持锁控制器提供，恢复后的审批与操作仍取自原账本。
 	contextState(): {
 		approval: TaskApproval | undefined;
+		policy: PolicyBinding | undefined;
 		operations: WorkerOperation[];
 		evaluated: RunResult[];
 		pending_run: string | undefined;
+		pending_requests: { id: number; estimate: number; status: "pending" | "unknown" }[];
 	} {
 		return structuredClone({
 			approval: this.persistence?.approval,
+			policy: this.persistence?.policy,
 			operations: this.commands,
 			evaluated: [...this.cache.values()],
 			pending_run: this.pendingRun,
+			// 模型流的未结算预留与 Worker 不确定状态都进入保护字段。
+			pending_requests: this.requests.flatMap((request) =>
+				request.status === "completed"
+					? []
+					: [{ id: request.id, estimate: request.estimate, status: request.status }],
+			),
 		});
 	}
 
@@ -1133,13 +1161,14 @@ export class TaskController {
 	private async commitLedger(): Promise<void> {
 		if (!this.persistence) return;
 		if (this.ledgerFailed) throw new Error("AXIOM ledger failed; reopen the task to reconcile");
-		const { ledger, executor, approval, deadline, domain } = this.persistence;
+		const { ledger, executor, approval, deadline, domain, policy } = this.persistence;
 		try {
 			await ledger.save({
 				taskId: basename(this.root),
 				spec: this.spec,
 				domain,
 				approval,
+				...(policy ? { policy } : {}),
 				deadline,
 				savedAt: Date.now(),
 				summary: this.summary(),

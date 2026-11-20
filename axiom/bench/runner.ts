@@ -21,7 +21,8 @@ const graderAssets = [
 	"axiom/bench/runner.ts",
 	"axiom/bench/comparison.ts",
 	"axiom/bench/live.ts",
-	...["artifacts", "builder", "experience"].map((name) => `axiom/context/${name}.ts`),
+	"axiom/bench/observability.ts",
+	...["artifacts", "builder", "experience", "policy-loader"].map((name) => `axiom/context/${name}.ts`),
 	...["trace", "trace-evidence", "trace-report", "trace-rpc", "attribution"].map((name) => `axiom/bench/${name}.ts`),
 	"axiom/bench/deterministic.ts",
 	"axiom/durable/task-runtime.ts",
@@ -35,12 +36,13 @@ const graderAssets = [
 		"pareto-artifacts",
 		"process",
 		"experiment-domain",
+		"harness-policy",
 	].map((name) => `packages/coding-agent/src/axiom/execution/${name}.ts`),
 ];
 type RunState = "completed" | "timed_out" | "interrupted" | "error" | "integrity_rejected";
 interface Manifest {
 	schema_version: 1;
-	trace_schema_version?: 1;
+	trace_schema_version?: 1 | 2;
 	trace_derivation?: "failed";
 	case_id: string;
 	case_version: number;
@@ -77,6 +79,7 @@ export interface Result extends Grading {
 	failures: string[];
 	attribution?: typeof attributionPaths;
 	attribution_error?: "trace_derivation_failed";
+	observability?: "observability.json";
 }
 
 export async function runBatch(
@@ -184,7 +187,7 @@ async function runCase(
 	const evidence = await Promise.all((await evidenceFiles(root)).map((path) => digest(root, path)));
 	const manifest: Manifest = {
 		schema_version: 1,
-		trace_schema_version: 1,
+		trace_schema_version: 2,
 		case_id: item.id,
 		case_version: item.version,
 		case_sha256,
@@ -204,7 +207,7 @@ async function runCase(
 	const trace = await traceOutput(root, manifest, evidence, inputs, draft).catch((): undefined => undefined);
 	if (trace) {
 		await saveTrace(root, trace);
-		const derived = await Promise.all(traceFiles.map((path) => digest(root, path)));
+		const derived = await Promise.all(traceFiles(manifest.trace_schema_version).map((path) => digest(root, path)));
 		manifest.evidence = [...evidence, ...derived].sort((a, b): number =>
 			a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
 		);
@@ -241,13 +244,14 @@ export async function verifyRun(repo: string, root: string): Promise<Result> {
 	);
 	if (
 		manifest.trace_derivation === "failed" &&
-		archived.some((entry) => traceFiles.some((name) => name === entry.path))
+		archived.some((entry) => traceFiles(manifest.trace_schema_version).includes(entry.path))
 	)
 		throw new Error("Failed trace derivation contains unexpected derived evidence");
-	if (manifest.trace_schema_version === 1 && !manifest.trace_derivation) {
-		const raw = archived.filter((item) => !traceFiles.some((name) => name === item.path));
+	if (manifest.trace_schema_version && !manifest.trace_derivation) {
+		const names = traceFiles(manifest.trace_schema_version);
+		const raw = archived.filter((item) => !names.includes(item.path));
 		const derived = await traceOutput(root, manifest, raw, manifest.inputs, result);
-		for (const name of traceFiles)
+		for (const name of names)
 			if ((await file(root, name)).toString("utf8") !== derived[name])
 				throw new Error("Saved trace differs from independent derivation");
 	}
@@ -329,8 +333,11 @@ function finalResult(
 		failures,
 		...(manifest.trace_derivation === "failed"
 			? { attribution_error: "trace_derivation_failed" as const }
-			: manifest.trace_schema_version === 1
-				? { attribution: attributionPaths }
+			: manifest.trace_schema_version
+				? {
+						attribution: attributionPaths,
+						...(manifest.trace_schema_version === 2 ? { observability: "observability.json" as const } : {}),
+					}
 				: {}),
 		matches_expected:
 			manifest.status === "completed" &&
@@ -373,6 +380,7 @@ function report(item: BenchCase, manifest: Manifest, result: Result): string {
 				]
 			: []),
 		"## Failure evidence",
+		...(result.observability ? ["[Observability](observability.json)"] : []),
 		...(result.attribution_error ? ["Trace derivation failed. The independent scores can be verified."] : []),
 		...(result.attribution
 			? ["[Trace](trace.jsonl) · [Attribution](attribution.md) · [Evidence index](trace-evidence.json)"]

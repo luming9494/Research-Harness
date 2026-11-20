@@ -32,6 +32,7 @@ export interface ContextOptions {
 	maxTokens?: number;
 	priorities?: Partial<Record<Layer, number>>;
 	resumed?: boolean;
+	errorDetail?: "category" | "reason";
 }
 export interface ContextWindow {
 	schema_version: 1;
@@ -50,6 +51,25 @@ export interface ContextWindow {
 	experience: Experience[];
 	artifacts: ArtifactReference[];
 	budget: { limit: number; estimated: number; omitted: number; critical_overflow: boolean };
+}
+
+// Pi 保留切点与原生会话条目。扩展提供由账本重建的安全摘要。
+export function ledgerCompaction(
+	preparation: { firstKeptEntryId: string; tokensBefore: number },
+	context: ContextWindow,
+): {
+	summary: string;
+	firstKeptEntryId: string;
+	tokensBefore: number;
+	details: { source: string; schema_version: 1; critical: ContextWindow["critical"] };
+} {
+	return {
+		summary:
+			"AXIOM context v1. Current research state is reconstructed from the task ledger before the next request. Inspect for current evidence and unresolved failures.",
+		firstKeptEntryId: preparation.firstKeptEntryId,
+		tokensBefore: preparation.tokensBefore,
+		details: { source: "axiom-ledger", schema_version: 1, critical: context.critical },
+	};
 }
 
 // 明确列出可进入提示的指标，忽略日志、源码、自由文本和自报指标。
@@ -95,13 +115,17 @@ export async function buildContext(
 		(row) => row.status === "evaluated" || row.status === "cache_hit",
 	);
 	const code = last?.failure_category ?? snapshot.failure_category;
+	const unresolved = !last || snapshot.experiments.indexOf(last) > lastSuccess;
 	const failure =
 		last || code
 			? {
 					id: last?.id ?? null,
 					category: code ?? "unknown",
-					unresolved: !last || snapshot.experiments.indexOf(last) > lastSuccess,
-					reason: last && code === "invalid_candidate" ? await reviewReason(root, state, last.id) : null,
+					unresolved,
+					reason:
+						last && code === "invalid_candidate" && (unresolved || options.errorDetail !== "category")
+							? await reviewReason(root, state, last.id)
+							: null,
 					repair: code === "invalid_candidate" ? candidateStructure : undefined,
 				}
 			: null;
@@ -119,7 +143,8 @@ export async function buildContext(
 		source: "AXIOM TaskController / ledger",
 		recovery: options.resumed === true,
 		task_id: snapshot.task_id,
-		spec: { ...spec, goal },
+		// Goal 属于用户数据。系统段落仅记录其身份，原文可从 inspect 的工具数据获得。
+		spec,
 		goal_sha256: sha256(goal),
 		approval: state.approval
 			? { approved_at: state.approval.approvedAt, sha256: sha256(JSON.stringify(state.approval)) }
@@ -129,6 +154,10 @@ export async function buildContext(
 		stop_reason: snapshot.stop_reason ?? null,
 		remaining: snapshot.remaining,
 		unconfirmed,
+		unconfirmed_model_requests: state.pending_requests ?? [],
+		policy: state.policy
+			? { id: state.policy.config.id, version: state.policy.config.version, sha256: state.policy.sha256 }
+			: null,
 		pending_candidate: state.pending_run ?? null,
 		phase: snapshot.fidelity ? "staged" : "full",
 		best: snapshot.best

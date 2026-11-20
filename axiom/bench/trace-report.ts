@@ -2,16 +2,22 @@
 import { attribute } from "./attribution.ts";
 import type { Grading } from "./grader.ts";
 import { type Digest, json, save } from "./io.ts";
+import { exportObservations } from "./observability.ts";
 import { collectTrace, type TraceRun } from "./trace.ts";
 import { type EvidenceReference, TraceEvidence } from "./trace-evidence.ts";
 
-export const traceFiles = ["trace.jsonl", "attribution.json", "attribution.md", "trace-evidence.json"] as const;
+const previousFiles = ["trace.jsonl", "attribution.json", "attribution.md", "trace-evidence.json"] as const;
+
+// 旧版档案仍使用原派生文件集合。
+export function traceFiles(version: TraceRun["trace_schema_version"]): readonly string[] {
+	return version === 2 ? [...previousFiles, "observability.json"] : previousFiles;
+}
 export const attributionPaths = {
 	schema_version: 1,
-	trace: traceFiles[0],
-	results: traceFiles[1],
-	report: traceFiles[2],
-	evidence_index: traceFiles[3],
+	trace: previousFiles[0],
+	results: previousFiles[1],
+	report: previousFiles[2],
+	evidence_index: previousFiles[3],
 } as const;
 
 // 序列化只依赖归档证据和评分轴，因此 --verify 可重算并逐字节检查。
@@ -21,7 +27,7 @@ export async function traceOutput(
 	evidence: Digest[],
 	inputs: readonly Digest[],
 	grades: Grading,
-): Promise<Record<(typeof traceFiles)[number], string>> {
+): Promise<Record<string, string>> {
 	const store = new TraceEvidence(root, evidence);
 	const events =
 		run.status === "integrity_rejected"
@@ -35,6 +41,9 @@ export async function traceOutput(
 		/\/(review_candidate|validate_only|pareto_validate)\.py$/.test(input.path),
 	);
 	return {
+		...(run.trace_schema_version === 2
+			? { "observability.json": await exportObservations(run, events, grades) }
+			: {}),
 		"trace.jsonl": `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
 		"attribution.json": `${JSON.stringify(
 			{
@@ -73,8 +82,8 @@ export async function traceOutput(
 }
 
 // 写入新分析目录时保留原归档，输出身份由原运行 ID 关联。
-export async function saveTrace(root: string, output: Record<(typeof traceFiles)[number], string>): Promise<void> {
-	for (const name of traceFiles) await save(root, name, output[name]);
+export async function saveTrace(root: string, output: Record<string, string>): Promise<void> {
+	for (const [name, content] of Object.entries(output)) await save(root, name, content);
 }
 
 // 离线补充报告绑定源清单字节，便于对历史档案重新复核。

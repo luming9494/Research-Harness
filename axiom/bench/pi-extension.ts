@@ -10,6 +10,7 @@ export default function comparisonExtension(pi: ExtensionAPI): void {
 	const stopAtCandidate = process.env.AXIOM_BENCH_BARRIER === "candidate-committed";
 	registerTaskExtension(pi, (): boolean => false, {
 		comparison: true,
+		governance: process.env.AXIOM_BENCH_GOVERNANCE === "1",
 		context: arm === "B2" && process.env.AXIOM_BENCH_CONTEXT === "enhanced",
 		create:
 			arm === "B2"

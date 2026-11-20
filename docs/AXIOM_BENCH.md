@@ -11,6 +11,7 @@ npm run bench:axiom -- --list
 npm run bench:axiom -- --profile core
 npm run bench:axiom -- --case T1-DUR-02 --case T1-SEARCH-01
 npm run bench:axiom -- --profile live
+npm run bench:axiom -- --profile governance
 npm run bench:axiom -- --verify private/axiom-bench/<batch-id>/<case-id>
 node --conditions=source --experimental-strip-types --test tests/axiom/bench.test.mjs
 npm run test:ml
@@ -45,6 +46,8 @@ Case Schema v1 记录 ID、类别、版本、任务描述、能力、数据与�
 - `--verify` 核对当前资产身份和归档摘要，再重算两个评分轴并比对原结果。评分文件、Case 规则或证据被改动会被拒绝。超时和中断保存真实状态，证据不足时逐轴标为 unknown。
 
 WP-07.3 生成 `trace.jsonl`、`attribution.json`、`attribution.md` 和 `trace-evidence.json`，复核时重算归因。`--attribute <run-directory>` 为历史归档在新目录生成派生分析，原结果继续按当时的判题规则保存。[失败归因协议](AXIOM_FAILURE_ATTRIBUTION.md)
+
+WP-08.2 的 `governance` Profile 运行 `T3-GOV-01`，检查已审批策略绑定、原生 Compaction 后跨进程恢复和恶意输入下的执行权限。Trace v2 关联策略、请求、工具调用、训练操作与评分证据，`observability.json` 随归档独立重算核验。其余 Profile 也产生本地观测归档。[命令与验收证据](AXIOM_SANDBOX_OBSERVABILITY.md)
 
 ## 范围与 WP-07.2 对照
 

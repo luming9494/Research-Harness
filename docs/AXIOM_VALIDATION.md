@@ -1,8 +1,20 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-09.1 证据驱动策略进化
+
+真实 DeepSeek Flash 从复核过的 AST 拒绝生成 A，再读取 A 的独立评测反馈生成 B。批准基线、A、B 各完成一个 `T3-CTX-02`，双轴均为 100，均成功修订与恢复，训练累计各 3 次、重复 0 次。输入 Token 为 31,082、19,205、26,897。固定筛选规则因样本不足将两个候选保留待定。提案和评测共 25 次请求、83,328 Token，Pi 估算 USD 0.024814164。[命令、候选身份和独立评测](AXIOM_SELF_EVOLUTION.md)
+
+重新核验 Windows WSL2 Docker 的本机日志。固定 Tiny XOR 真实容器全训完成，宿主独立复验 512 个 validation 样本，accuracy `0.5`、loss `0.6929062008857727`，权重和产物摘要留证。[WSL2 容器验收](AXIOM_SANDBOX_OBSERVABILITY.md)
+
+`npm run build:offline` 和 `npm run check` 通过。离线重建后的三份真实开发归档均再次通过 `--verify`。`npm run test:ml` 将 `bench-comparison` 文件单独调度，保留原有 540 秒机制组限时。6 个机制用例在 482.12 秒内完成并逐项复核。
+
+Windows `npm run test:ml` 首轮 Python **18/18**、Node **90/90**、Pi Session **16/17**。`axiom-tiny.test.ts` 的真实训练用例触发原有 180 秒超时。Windows 两文件串行复跑和单用例复跑均超时，忽略目录中的 `wp03-6JOxxC/commands/` 记录了 22 个成功子进程，最后一笔在任务目录建立约 173.5 秒后写入。原测试、判题和限时保持原设置。
+
+在独立 WSL2 Linux 工作区使用 Node `22.21.0`、PyTorch `2.2.0+cpu` 执行 `node ../../node_modules/vitest/dist/cli.js --run test/suite/axiom-tiny.test.ts -t 'runs baseline, reviewed candidate, Smoke, independent validation and keep through Pi'`。该用例 **1/1** 通过，测试用时 61.67 秒。合并 Windows 全量记录与 Linux 定向补跑，**125/125** 项有通过记录。Windows 全量命令仍因这一项超时返回失败；其余 124 项有 Windows 通过记录。
+
 ## WP-08.2 策略治理、隔离与观测验收
 
-真实 DeepSeek Flash 用例 `T3-GOV-01` 通过 Task Success 和 Harness Correctness，均为 100，`--verify` 一致。Pi 原生 Compaction 记录 44,016 Token，强制退出后用原任务 ID 和版本 2 继续。训练步数从 160 结算到 240，累计 3 次启动、0 次重复，最终候选验证准确率 `0.998046875`、参数量 22。实调 10 次，实际输入 76,254 Token，总计 78,178 Token，Pi 估算 USD `0.02349156`。Windows 缺少 Docker，已验证入口拒绝启动，真实容器验收待补。[独立复核命令、账本及证据摘要](AXIOM_SANDBOX_OBSERVABILITY.md)
+真实 DeepSeek Flash 用例 `T3-GOV-01` 通过 Task Success 和 Harness Correctness，均为 100，`--verify` 一致。Pi 原生 Compaction 记录 44,016 Token，强制退出后用原任务 ID 和版本 2 继续。训练步数从 160 结算到 240，累计 3 次启动、0 次重复，最终候选验证准确率 `0.998046875`、参数量 22。实调 10 次，实际输入 76,254 Token，总计 78,178 Token，Pi 估算 USD `0.02349156`。阶段首次验收验证了缺少 Docker 时拒绝启动，后续在 WSL2 补验真实训练。[独立复核命令、账本及证据摘要](AXIOM_SANDBOX_OBSERVABILITY.md)
 
 `npm run build:offline`、`npm run check` 和 WP-08.2 定向测试 **5/5** 通过。首次 `npm run test:ml` 中 Python **18/18**、Node **83/84**，`BENCH-072-03` 的机制组在并行执行中触发既有 540 秒超时，最后一项 `T2-SEARCH-02` 未完成，脚本在进入 Pi Session 测试前退出。单独运行 `node --test tests/axiom/bench-comparison.test.mjs` 后 **3/3** 通过，含 6 个机制用例及其独立复核，整组 467.04 秒。超时、评分阈值及回归覆盖保持原设置。
 

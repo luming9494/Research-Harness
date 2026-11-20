@@ -12,12 +12,24 @@ npm run bench:axiom -- --sandbox <approved-local-image@sha256:digest>
 
 Windows 默认查找 Docker Desktop CLI，可通过 `AXIOM_DOCKER` 指定批准的绝对路径。子进程启动前生成只写一次的操作意图，超时按容器名和自有 label 尝试清除，无法确认时保留 `unknown`。入口不自动重试。当前固定验收入口与正常任务控制器分离，因此原 Tiny CPU 指纹、配额、独立结果与 Durable 恢复均保持原语义。Docker 作业重接不属于本切片。
 
-**本机验收边界。** Windows 无 Docker CLI、Docker Desktop 服务或可用 Linux Docker 运行时。实际调用返回 `Docker CLI unavailable; sandbox training was not launched`。定向测试核验了固定命令、受限挂载与无运行时失败。容器内网络拒绝、文件约束、资源限制、超时、真实隔离训练及输出复验仍待在可用 Docker 环境运行。
+**Windows 与 WSL2。** Windows Named Pipe 路径曾返回 `Docker CLI unavailable; sandbox training was not launched`。随后在 Ubuntu 24.04.5 LTS 的 WSL2 中安装 Docker Engine 29.10.0，AXIOM 通过现有 Linux Unix Socket 路径完成真实训练和复验。Windows 侧继续通过明确的 WSL 调用使用同一入口。
 
 ```powershell
 $digest = 'a' * 64
 npm run bench:axiom -- --sandbox "example.invalid/axiom@sha256:$digest" --out private/axiom-sandbox-wp082
 ```
+
+## WSL2 真实容器验收
+
+在 Windows 11 `26200.9974`、WSL `2.6.3.0`、Ubuntu `24.04.5 LTS` 和 Docker Engine `29.10.0` 上运行，WSL 配额为 3 GiB、4 个逻辑 CPU 与 1 GiB Swap。Docker 和 containerd 运行于本地 Unix Socket。安装日志 `/var/log/axiom-docker-wsl-setup.log` 记录 `Hello from Docker!`、`ISOLATION_CHECKS_PASS` 和 `CONTAINER_AUTO_REMOVAL_PASS`。受控 BusyBox 容器从内部检查只保留 loopback、只读根、非 Root UID、cgroup 的 CPU/内存/PID 限制、零有效能力和 `NoNewPrivs`。容器退出后查询已无实例。
+
+```powershell
+wsl -d Ubuntu-24.04 -e grep AXIOM_SANDBOX_VALIDATION_PASS /var/log/axiom-docker-wsl-sandbox.log
+```
+
+通过原 `sandboxSmoke` 使用本地离线构建 PyTorch `2.2.0+cpu` 镜像 `docker.io/library/axiom-sandbox-cpu@sha256:dd2a9834278de1a43146ce3fc02435a94ba6a30573234cb89daeffa589b926e8`。运行 `axiom-cpu-d2725d34-aa71-4f5d-9f87-79ad98d233b6` 执行固定 Tiny XOR Full 训练。宿主验证了 512 个 validation 样本，准确率 `0.5`，loss `0.6929062008857727`。权重 SHA-256 为 `d19cd10ab2b13c0083195e823bf0973265356c2638c1cc296012de34f59a0858`，`run.json` 为 `0fc85c7104483c818cb37bdd9728668971fee3018eb20e5bac2efe82c6f2831c`。候选源码、配置和验证器摘要与 Windows 仓库文件一致。WSL 本地日志保留实际归档 `/var/tmp/axiom-wsl-build.7j4j9dwq/results/axiom-sandbox-48HjFH` 的输出；安装与验收启动脚本位于 Git 忽略的 `private/`。
+
+此验收覆盖固定可信训练入口。普通 TaskController 和 WP-09.1 开发 Case 继续使用可信本地执行。独立的容器超时和异常重接试验仍待覆盖。
 
 ## 本地观测
 

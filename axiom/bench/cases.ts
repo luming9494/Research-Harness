@@ -31,6 +31,7 @@ const schema = Type.Object(
 		evidence: Type.Array(Type.String(), { minItems: 1 }),
 		grader: Type.Literal("axiom-bench-grader/v1"),
 		accuracy_floor: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+		context: Type.Optional(Type.Union([Type.Literal("baseline"), Type.Literal("enhanced")])),
 		comparison: Type.Optional(
 			Type.Object(
 				{
@@ -419,8 +420,73 @@ const traceCases = [
 		},
 	),
 ];
+// 归因专用日志在这个故障注入中不可解码，原独立策略判题仍使用有效证据。
+traceCases.push(
+	entry(
+		"T1-TRACE-02",
+		"deterministic",
+		"Preserve policy scores when a trace-only journal cannot be decoded",
+		"fail",
+		["policy"],
+		{
+			injection: "Store an incomplete trace-only journal line after the actual policy check",
+		},
+	),
+);
 
-export const cases: readonly BenchCase[] = [...core, ...comparisonCases, ...mechanismCases, ...traceCases];
+// 两个 B2 对照臂共用任务、预算和故障同步点，唯一实验变量是上下文模式。
+const contextCases = (["baseline", "enhanced"] as const).map(
+	(context, index): BenchCase =>
+		entry(
+			`T3-CTX-0${index + 1}`,
+			"live_agent",
+			"Improve Tiny XOR with a rejected proposal, a repair, and a second distinct verified candidate after recovery.",
+			"pass",
+			["budget", "operations", "provenance", "usage", "comparison", "context_recovery"],
+			{
+				context,
+				model: "deepseek/deepseek-flash",
+				accuracy_floor: 0.95,
+				comparison: {
+					arm: "B2",
+					task: "feedback",
+					min_full_candidates: 2,
+					starting_model: "linear",
+					learning_rate: { min: 0.01, max: 0.08 },
+				},
+				budget: {
+					max_tokens: 120_000,
+					max_steps: 244,
+					max_proposals: 2,
+					max_compute_seconds: 300,
+					max_task_wall_seconds: 600,
+				},
+				assets: [
+					...cpu,
+					"axiom/bench/pi-extension.ts",
+					"axiom/extensions/axiom-task.ts",
+					"packages/coding-agent/dist/bundle/cli.js",
+				],
+				timeout_ms: 660_000,
+				injection: "Kill Pi after the first verified candidate, then reopen the original task in a new Pi Session",
+				scoring: {
+					task: ["independent_delivery", "quality_floor", "full_candidates"].map((id) => ({ id, weight: 1 })),
+					harness: ["budget", "operations", "provenance", "usage", "comparison", "context_recovery"].map((id) => ({
+						id,
+						weight: 1,
+					})),
+				},
+			},
+		),
+);
+
+export const cases: readonly BenchCase[] = [
+	...core,
+	...comparisonCases,
+	...mechanismCases,
+	...traceCases,
+	...contextCases,
+];
 
 export function selectCases(profile: string | undefined, ids: readonly string[]): BenchCase[] {
 	if (profile && ids.length) throw new Error("Choose a profile or a list of Case IDs");
@@ -443,6 +509,8 @@ export function selectCases(profile: string | undefined, ids: readonly string[])
 			return mechanismCases;
 		case "trace":
 			return traceCases;
+		case "context":
+			return contextCases;
 		default:
 			throw new Error(`Unknown profile ${profile}`);
 	}

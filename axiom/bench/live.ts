@@ -15,10 +15,29 @@ export interface LiveTrace {
 	tool_evidence: PiToolReceipt[];
 	turns: { tools: string[] }[];
 	admitted: number;
-	usage: { provider: string; model: string; tokens: number | null; cost: number | null; stop_reason?: string }[];
+	usage: {
+		provider: string;
+		model: string;
+		tokens: number | null;
+		cost: number | null;
+		stop_reason?: string;
+		input_tokens?: number | null;
+	}[];
+	context: ContextReceipt[];
+	feedback: { epoch: number; error_visible: boolean; actionable: boolean }[];
 	barrier: boolean;
 	resumed: boolean;
 	error: string | null;
+}
+export interface ContextReceipt {
+	task_id: string;
+	deadline_ms: number;
+	approval: { sha256: string };
+	best: { id: string } | null;
+	remaining: { training_steps: number; experiments: number };
+	recovery: boolean;
+	failure: { category: string; reason: string | null } | null;
+	experiences: string[];
 }
 interface RpcEvent extends PiToolEvent {
 	id?: string;
@@ -34,7 +53,13 @@ interface RpcEvent extends PiToolEvent {
 				provider?: string;
 				model?: string;
 				stopReason?: string;
-				usage?: { totalTokens?: number; cost?: { total?: number } };
+				usage?: {
+					totalTokens?: number;
+					input?: number;
+					cacheRead?: number;
+					cacheWrite?: number;
+					cost?: { total?: number };
+				};
 		  };
 	data?: { model?: { provider?: string; id?: string } };
 	toolName?: string;
@@ -64,7 +89,7 @@ export async function runLive(
 		? {
 				...base,
 				version: 2,
-				max_revisions: 0,
+				max_revisions: item.context ? 1 : 0,
 				...(item.comparison.starting_model === "shallow_tanh" ? { starting_model: "shallow_tanh" as const } : {}),
 				parameters: { learning_rate: item.comparison.learning_rate },
 				objective: { metric: "accuracy", direction: "maximize", target: null },
@@ -77,11 +102,13 @@ export async function runLive(
 		turns: [],
 		admitted: 0,
 		usage: [],
+		context: [],
+		feedback: [],
 		barrier: false,
 		resumed: false,
 		error: null,
 	};
-	const barrier = item.comparison?.task === "interruption";
+	const barrier = Boolean(item.context) || item.comparison?.task === "interruption";
 	try {
 		await drive(item, repo, python, signal, spec, trace, barrier);
 		if (trace.barrier && !trace.error && trace.workspace) {
@@ -143,7 +170,8 @@ function drive(
 					PI_CODING_AGENT_DIR: agentDir,
 					AXIOM_PYTHON: python,
 					AXIOM_BENCH_ARM: item.comparison?.arm,
-					AXIOM_BENCH_BARRIER: barrier ? "baseline-committed" : "",
+					AXIOM_BENCH_CONTEXT: item.context,
+					AXIOM_BENCH_BARRIER: barrier ? (item.context ? "candidate-committed" : "baseline-committed") : "",
 				},
 				stdio: ["pipe", "pipe", "pipe"],
 				windowsHide: true,
@@ -171,6 +199,25 @@ function drive(
 			// 进程编号使恢复前后重复使用的原生工具 ID 保持独立。
 			const receipt = toolReceipt(event, resumeId ? 2 : 1, trace.admitted || trace.usage.length);
 			if (receipt) trace.tool_evidence.push(receipt);
+			// 观察实际工具结果中错误是否可见，只存布尔证据，不保存回复正文。
+			if (item.context && event.type === "tool_execution_end") {
+				const body = event.result?.content?.[0]?.text ?? "";
+				trace.feedback.push({
+					epoch: resumeId ? 1 : 0,
+					error_visible: body.includes("invalid_candidate"),
+					actionable:
+						body.includes("Candidate policy rejected") ||
+						body.includes("Only 'from torch import nn' and build_model() are allowed"),
+				});
+			}
+			if (
+				item.context &&
+				event.type === "extension_ui_request" &&
+				event.method === "notify" &&
+				typeof event.message === "string" &&
+				event.message.startsWith("Benchmark context ")
+			)
+				trace.context.push(JSON.parse(event.message.slice("Benchmark context ".length)) as ContextReceipt);
 			if (event.type === "response" && event.success === false) {
 				fail(`Pi RPC command failed: ${event.command}`);
 				return;
@@ -213,9 +260,13 @@ function drive(
 				send({
 					id: "research",
 					type: "prompt",
-					message: item.comparison
-						? `${item.description} Use only the approved tools. Inspect the task, obtain or reuse the baseline, propose your own complete legal model.py candidates with a rationale, and use only independently measured validation scores. Explicit learning rates must fit the approved range. Wait for the requested evaluated candidates or a host stop before finishing. Do not access final-test.`
-						: "Use the approved Tiny CPU tools to inspect, run the baseline, and execute one new legal candidate of your choosing that improves validation. For the candidate tool in this v1 task send only content (complete legal model.py) and rationale. If tool input is rejected before a launch, correct the arguments before finishing. Wait for the independently evaluated candidate result or host stop before finishing. Do not access final-test.",
+					message: item.context
+						? resumeId
+							? "This is a new Pi Session for the same approved task. Inspect the recovered state and complete one distinct legal Full candidate with independent validation. Use retained failure evidence and do not retrain the baseline. Never use final-test."
+							: "Run the baseline. For this controlled repair experiment make your first candidate exactly this source: from torch import nn\nHIDDEN = 8\ndef build_model():\n    return nn.Sequential(nn.Linear(2, HIDDEN), nn.Tanh(), nn.Linear(HIDDEN, 2))\nAfter the rejection use the feedback to repair the source and submit a legal candidate. Each candidate must be submitted in its own turn. The host will interrupt after the first verified candidate. Never use final-test."
+						: item.comparison
+							? `${item.description} Use only the approved tools. Inspect the task, obtain or reuse the baseline, propose your own complete legal model.py candidates with a rationale, and use only independently measured validation scores. Explicit learning rates must fit the approved range. Wait for the requested evaluated candidates or a host stop before finishing. Do not access final-test.`
+							: "Use the approved Tiny CPU tools to inspect, run the baseline, and execute one new legal candidate of your choosing that improves validation. For the candidate tool in this v1 task send only content (complete legal model.py) and rationale. If tool input is rejected before a launch, correct the arguments before finishing. Wait for the independently evaluated candidate result or host stop before finishing. Do not access final-test.",
 				});
 			}
 			if (
@@ -245,6 +296,18 @@ function drive(
 					model: m.model ?? "",
 					tokens: m.stopReason === "error" || m.stopReason === "aborted" ? null : (m.usage?.totalTokens ?? null),
 					cost: m.usage?.cost?.total ?? null,
+					...(item.context
+						? {
+								input_tokens:
+									m.stopReason === "error" ||
+									m.stopReason === "aborted" ||
+									m.usage?.input === undefined ||
+									m.usage.cacheRead === undefined ||
+									m.usage.cacheWrite === undefined
+										? null
+										: m.usage.input + m.usage.cacheRead + m.usage.cacheWrite,
+							}
+						: {}),
 					stop_reason: m.stopReason,
 				});
 			}

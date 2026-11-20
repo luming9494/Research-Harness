@@ -482,6 +482,21 @@ export class TaskController {
 		});
 	}
 
+	// 只读投影由当前持锁控制器提供，恢复后的审批与操作仍取自原账本。
+	contextState(): {
+		approval: TaskApproval | undefined;
+		operations: WorkerOperation[];
+		evaluated: RunResult[];
+		pending_run: string | undefined;
+	} {
+		return structuredClone({
+			approval: this.persistence?.approval,
+			operations: this.commands,
+			evaluated: [...this.cache.values()],
+			pending_run: this.pendingRun,
+		});
+	}
+
 	// stop() closes admission immediately, including operations already queued by the same assistant turn.
 	stop(reason: StopReason): Promise<ReturnType<TaskController["snapshot"]>> {
 		this.requestStop(reason);

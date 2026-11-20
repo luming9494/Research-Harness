@@ -21,6 +21,7 @@ const graderAssets = [
 	"axiom/bench/runner.ts",
 	"axiom/bench/comparison.ts",
 	"axiom/bench/live.ts",
+	...["artifacts", "builder", "experience"].map((name) => `axiom/context/${name}.ts`),
 	...["trace", "trace-evidence", "trace-report", "trace-rpc", "attribution"].map((name) => `axiom/bench/${name}.ts`),
 	"axiom/bench/deterministic.ts",
 	"axiom/durable/task-runtime.ts",
@@ -40,6 +41,7 @@ type RunState = "completed" | "timed_out" | "interrupted" | "error" | "integrity
 interface Manifest {
 	schema_version: 1;
 	trace_schema_version?: 1;
+	trace_derivation?: "failed";
 	case_id: string;
 	case_version: number;
 	case_sha256: string;
@@ -74,6 +76,7 @@ export interface Result extends Grading {
 	wall_seconds: number;
 	failures: string[];
 	attribution?: typeof attributionPaths;
+	attribution_error?: "trace_derivation_failed";
 }
 
 export async function runBatch(
@@ -195,13 +198,18 @@ async function runCase(
 		inputs,
 		evidence,
 	};
-	const result = finalResult(item, manifest, graded, await retainedUsage(item, root));
+	const usage = await retainedUsage(item, root);
 	// 归因在评分完成后运行，四个派生文件随后单独登记入清单。
-	await saveTrace(root, await traceOutput(root, manifest, evidence, inputs, result));
-	const derived = await Promise.all(traceFiles.map((path) => digest(root, path)));
-	manifest.evidence = [...evidence, ...derived].sort((a, b): number =>
-		a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
-	);
+	const draft = finalResult(item, manifest, graded, usage);
+	const trace = await traceOutput(root, manifest, evidence, inputs, draft).catch((): undefined => undefined);
+	if (trace) {
+		await saveTrace(root, trace);
+		const derived = await Promise.all(traceFiles.map((path) => digest(root, path)));
+		manifest.evidence = [...evidence, ...derived].sort((a, b): number =>
+			a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+		);
+	} else manifest.trace_derivation = "failed";
+	const result = finalResult(item, manifest, graded, usage);
 	await json(root, "manifest.json", manifest);
 	await json(root, "result.json", result);
 	await save(root, "report.md", report(item, manifest, result));
@@ -231,7 +239,12 @@ export async function verifyRun(repo: string, root: string): Promise<Result> {
 		manifest.status === "completed" ? await grade(item, root) : undefined,
 		await retainedUsage(item, root),
 	);
-	if (manifest.trace_schema_version === 1) {
+	if (
+		manifest.trace_derivation === "failed" &&
+		archived.some((entry) => traceFiles.some((name) => name === entry.path))
+	)
+		throw new Error("Failed trace derivation contains unexpected derived evidence");
+	if (manifest.trace_schema_version === 1 && !manifest.trace_derivation) {
 		const raw = archived.filter((item) => !traceFiles.some((name) => name === item.path));
 		const derived = await traceOutput(root, manifest, raw, manifest.inputs, result);
 		for (const name of traceFiles)
@@ -314,7 +327,11 @@ function finalResult(
 		wall_seconds: manifest.wall_seconds,
 		...actual,
 		failures,
-		...(manifest.trace_schema_version === 1 ? { attribution: attributionPaths } : {}),
+		...(manifest.trace_derivation === "failed"
+			? { attribution_error: "trace_derivation_failed" as const }
+			: manifest.trace_schema_version === 1
+				? { attribution: attributionPaths }
+				: {}),
 		matches_expected:
 			manifest.status === "completed" &&
 			actual.task_success.status === item.expected.task &&
@@ -348,6 +365,7 @@ function report(item: BenchCase, manifest: Manifest, result: Result): string {
 		axis("Task Success", result.task_success),
 		axis("Harness Correctness", result.harness_correctness),
 		`Model requests ${result.usage.requests ?? "unknown"}. Tokens ${result.usage.tokens ?? "unknown"}. Estimated USD ${result.usage.estimated_cost_usd ?? "unknown"}.`,
+		...(result.context_comparison ? [`Context comparison \`${JSON.stringify(result.context_comparison)}\`.`] : []),
 		`Wall ${result.wall_seconds.toFixed(3)} s. Worker process time ${result.compute_seconds ?? "unknown"} s.`,
 		...(result.execution
 			? [
@@ -355,6 +373,7 @@ function report(item: BenchCase, manifest: Manifest, result: Result): string {
 				]
 			: []),
 		"## Failure evidence",
+		...(result.attribution_error ? ["Trace derivation failed. The independent scores can be verified."] : []),
 		...(result.attribution
 			? ["[Trace](trace.jsonl) · [Attribution](attribution.md) · [Evidence index](trace-evidence.json)"]
 			: []),

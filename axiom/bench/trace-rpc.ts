@@ -26,7 +26,7 @@ export function toolReceipt(event: PiToolEvent, processNumber: number, requests:
 	if ((event.type !== "tool_execution_start" && event.type !== "tool_execution_end") || !event.toolCallId)
 		return undefined;
 	const tool =
-		event.toolName && /^axiom_task_(inspect|baseline|candidate|finish)$/.test(event.toolName)
+		event.toolName && /^axiom_task_(inspect|baseline|candidate|finish|artifact)$/.test(event.toolName)
 			? event.toolName
 			: "unlisted_tool";
 	const start = event.type === "tool_execution_start";

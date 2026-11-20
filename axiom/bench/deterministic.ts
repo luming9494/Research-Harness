@@ -35,7 +35,7 @@ export async function deterministic(
 		rules: TASK_RULES,
 		budget: { ...DEFAULT_BUDGET, training_steps: Math.max(1, item.budget.max_steps) },
 	});
-	if (item.id === "T1-POL-01") {
+	if (item.id === "T1-POL-01" || item.id === "T1-TRACE-02") {
 		const task = await TaskController.create(repo, python, spec, () => {});
 		try {
 			const rejected = await rejection(() =>
@@ -43,6 +43,11 @@ export async function deterministic(
 					learning_rate: 0.08,
 				}),
 			);
+			if (item.id === "T1-TRACE-02") {
+				// 只损坏 Trace 输入，保留策略评测所需的真实拒绝记录。
+				await mkdir(join(root, "final"));
+				await writeFile(join(root, "final", "events.jsonl"), '{"incomplete":\n');
+			}
 			return { rejected, commands: await readdir(join(task.root, "commands")), outcome: task.snapshot() };
 		} finally {
 			await task.closeLedger();

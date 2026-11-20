@@ -40,12 +40,19 @@ export class TraceEvidence {
 		const value: unknown =
 			kind === "json"
 				? JSON.parse(raw)
-				: raw
-						.trimEnd()
-						.split(/\r?\n/)
-						.filter(Boolean)
-						.map((line) => JSON.parse(line) as unknown);
-		return { value: value as T, ref: (locator): EvidenceReference => ({ ...entry, locator }) };
+				: raw.length
+					? raw
+							.replace(/\r?\n$/, "")
+							.split(/\r?\n/)
+							.map((line) => JSON.parse(line) as unknown)
+					: [];
+		return {
+			value: value as T,
+			ref: (locator): EvidenceReference => {
+				validateLocator(value, locator, kind);
+				return { ...entry, locator };
+			},
+		};
 	}
 
 	// 工件可以是权重等二进制文件，归因只需要核验字节及摘要。
@@ -68,5 +75,28 @@ export class TraceEvidence {
 		if (bytes.byteLength !== entry.bytes || sha256(bytes) !== entry.sha256)
 			throw new Error("Trace evidence digest mismatch");
 		return bytes;
+	}
+}
+
+// RFC 6901 只访问对象自身字段。JSONL 按物理行号定位；空行属于坏证据。
+function validateLocator(value: unknown, locator: string, kind: "json" | "jsonl"): void {
+	if (!locator) return;
+	if (kind === "jsonl") {
+		const match = /^line:([1-9]\d*)$/.exec(locator);
+		if (match && Array.isArray(value) && Number(match[1]) <= value.length) return;
+		throw new Error("Invalid JSONL evidence line");
+	}
+	if (!locator.startsWith("/") || /~(?![01])/.test(locator)) throw new Error("Invalid JSON Pointer");
+	let current = value;
+	for (const escaped of locator.slice(1).split("/")) {
+		const key = escaped.replaceAll("~1", "/").replaceAll("~0", "~");
+		if (
+			current === null ||
+			typeof current !== "object" ||
+			(Array.isArray(current) && !/^(0|[1-9]\d*)$/.test(key)) ||
+			!Object.hasOwn(current, key)
+		)
+			throw new Error("JSON Pointer does not locate evidence");
+		current = (current as Record<string, unknown>)[key];
 	}
 }

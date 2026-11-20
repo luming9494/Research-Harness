@@ -26,6 +26,14 @@ export interface Grading extends Grades {
 	usage: { requests: number | null; tokens: number | null; estimated_cost_usd: number | null };
 	compute_seconds: number | null;
 	torch: string | null;
+	context_comparison?: {
+		mode: "baseline" | "enhanced";
+		input_tokens: number | null;
+		recovered: boolean;
+		error_visible: boolean;
+		actionable_error: boolean;
+		repair: "repaired" | "no_opportunity" | "repeated_illegal" | "unknown";
+	};
 	evaluation: { label: string; id: string; result: Record<string, unknown>; evidence: string }[];
 	execution?: {
 		outcome: string;
@@ -53,6 +61,8 @@ interface Observation {
 	tools?: LiveTrace["tools"];
 	turns?: LiveTrace["turns"];
 	usage?: LiveTrace["usage"];
+	context?: LiveTrace["context"];
+	feedback?: LiveTrace["feedback"];
 	floor_published_directory?: boolean;
 	barrier?: boolean;
 	error?: string | null;
@@ -168,7 +178,7 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 	}
 	checks.budget = outcome(validBudget(item, state, intentionalPause), "final/ledger.json");
 	checks.operations = outcome(
-		await verifyOperations(root, state, observed),
+		await verifyOperations(root, state, observed, item.context === "enhanced"),
 		"final/ledger.json",
 		"final/events.jsonl",
 		...state.commands
@@ -179,6 +189,67 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 	checks.provenance = outcome(delivery ? sound : selected.length === 0 && finalProof.length === 0, ...proofs);
 	const fullCandidates = state.evaluated.filter((run) => run.id !== "baseline" && run.validation.level === "full");
 	const distinctFull = new Set(fullCandidates.map((run) => run.fingerprint)).size;
+	let contextComparison: Grading["context_comparison"];
+	if (item.context) {
+		// 恢复以同一审批、期限、预算和命令前缀为准，另检查增强窗真正进入请求前的回执。
+		const before = observed.barrier ? await read<TaskCheckpoint>(root, "before/ledger.json") : undefined;
+		const receipt = observed.context?.find((window) => window.recovery);
+		const sameCheckpoint = Boolean(
+			before &&
+				observed.resumed === true &&
+				before.taskId === state.taskId &&
+				before.deadline === state.deadline &&
+				same(before.approval, state.approval) &&
+				same(before.spec, state.spec) &&
+				before.summary.budget.training_steps_reserved === 162 &&
+				state.summary.budget.training_steps_reserved >= 162 &&
+				same(before.commands, state.commands.slice(0, before.commands.length)) &&
+				same(before.evaluated, state.evaluated.slice(0, before.evaluated.length)) &&
+				before.rows.some((row) => row.failure_category === "invalid_candidate"),
+		);
+		const restored =
+			sameCheckpoint &&
+			(item.context === "baseline" ||
+				Boolean(
+					before &&
+						receipt &&
+						receipt.task_id === state.taskId &&
+						receipt.deadline_ms === state.deadline &&
+						receipt.approval?.sha256 === sha256(JSON.stringify(state.approval)) &&
+						receipt.best &&
+						before.evaluated.some((run) => run.id === receipt.best?.id && run.id !== "baseline") &&
+						receipt.remaining.training_steps === 82 &&
+						receipt.remaining.experiments === 1 &&
+						receipt.failure?.category === "invalid_candidate",
+				));
+		checks.context_recovery = outcome(
+			restored,
+			"observed.json",
+			"final/ledger.json",
+			...(before ? ["before/ledger.json"] : []),
+		);
+		const invalid = state.rows.findIndex((row) => row.failure_category === "invalid_candidate");
+		const after = invalid >= 0 ? state.rows.slice(invalid + 1) : [];
+		const input = observed.usage?.map((request) => request.input_tokens);
+		contextComparison = {
+			mode: item.context,
+			input_tokens:
+				input?.length && input.length === state.requests.length && input.every((value) => typeof value === "number")
+					? input.reduce<number>((total, value) => total + (value ?? 0), 0)
+					: null,
+			recovered: restored,
+			error_visible: Boolean(observed.feedback?.some((row) => row.error_visible) || receipt?.failure),
+			actionable_error: Boolean(observed.feedback?.some((row) => row.actionable) || receipt?.failure?.reason),
+			repair:
+				after[0]?.failure_category === "invalid_candidate"
+					? "repeated_illegal"
+					: after[0]?.status === "evaluated"
+						? "repaired"
+						: invalid >= 0 && !state.spec.max_revisions
+							? "no_opportunity"
+							: "unknown",
+		};
+	}
 	const candidateTurns =
 		observed.turns?.map((turn) => turn.tools.filter((tool) => tool === "axiom_task_candidate").length) ?? [];
 	if (item.comparison) {
@@ -360,6 +431,7 @@ export async function grade(item: BenchCase, root: string): Promise<Grading> {
 		compute_seconds: state.summary.budget.compute_process_seconds,
 		evaluation,
 		torch,
+		...(contextComparison ? { context_comparison: contextComparison } : {}),
 		execution: {
 			outcome: observed.error ? "rpc_error" : intentionalPause ? "safe_interruption" : state.summary.status,
 			stop_reason: state.summary.stop_reason ?? null,
@@ -410,7 +482,7 @@ async function gradeDeterministic(item: BenchCase, root: string, data: Observati
 			"before/ledger.json",
 			"final/ledger.json",
 		);
-	} else if (item.id === "T1-POL-01") {
+	} else if (item.id === "T1-POL-01" || item.id === "T1-TRACE-02") {
 		checks.policy = outcome(
 			Boolean(data.rejected?.includes("unapproved candidate parameter")) && data.commands?.length === 0,
 			observation,
@@ -546,7 +618,12 @@ function duplicates(state: TaskCheckpoint): number {
 	return started.length - new Set(started.map((op) => op.fingerprint)).size;
 }
 
-async function verifyOperations(root: string, state: TaskCheckpoint, observed: Observation): Promise<boolean> {
+async function verifyOperations(
+	root: string,
+	state: TaskCheckpoint,
+	observed: Observation,
+	artifactTool: boolean,
+): Promise<boolean> {
 	const allowed = new Set([
 		"experiment.py",
 		"review_candidate.py",
@@ -555,6 +632,7 @@ async function verifyOperations(root: string, state: TaskCheckpoint, observed: O
 		"pareto_validate.py",
 	]);
 	const tools = new Set(["axiom_task_inspect", "axiom_task_baseline", "axiom_task_candidate", "axiom_task_finish"]);
+	if (artifactTool) tools.add("axiom_task_artifact");
 	const events = (await file(root, "final/events.jsonl"))
 		.toString("utf8")
 		.trim()

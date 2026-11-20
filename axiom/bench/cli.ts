@@ -23,7 +23,7 @@ async function main(): Promise<void> {
 	});
 	if (values.help) {
 		console.log(
-			"npm run bench:axiom -- [--profile core|smoke|live|comparison|mechanisms|trace | --case ID ...] [--out DIR] [--list]\n" +
+			"npm run bench:axiom -- [--profile core|smoke|live|comparison|mechanisms|trace|context | --case ID ...] [--out DIR] [--list]\n" +
 				"npm run bench:axiom -- --profile comparison --phase pilot|formal [--repeats N]\n" +
 				"npm run bench:axiom -- --verify <case-run-directory>\n" +
 				"npm run bench:axiom -- --attribute <case-run-directory> [--out EXISTING-DIR]",

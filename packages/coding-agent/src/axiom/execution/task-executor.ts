@@ -245,6 +245,11 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 			this.spec.version === 2 && this.spec.starting_model === "shallow_tanh" ? "shallow-tanh.py" : "model.py";
 		this.original = await readFile(join(this.repo, "examples/tiny-ml-task", startAsset), "utf8");
 		this.config = await readFile(join(this.repo, "examples/tiny-ml-task/config.json"), "utf8");
+		// 只有宿主审批的 v2 种子会改变有效配置，旧任务保留原始配置字节。
+		if (this.spec.version === 2 && this.spec.initialization_seed !== undefined) {
+			const base = JSON.parse(this.config) as { epochs: number; learning_rate: number; seed: number };
+			this.config = JSON.stringify({ ...base, seed: this.spec.initialization_seed });
+		}
 		for (const path of [
 			...scripts.map((name) => join(this.repo, "examples/tiny-ml-eval", name)),
 			...[startAsset, "config.json"].map((name) => join(this.repo, "examples/tiny-ml-task", name)),

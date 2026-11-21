@@ -1,5 +1,13 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-11.2 多种子科研验证
+
+Windows 对 Seed 42、43、44 各执行三组学习率。九次完成、九份独立复算，Python 另行重算均值、范围、样本 SD 与配对差。SciFact 深度修订从两项否定证据生成，保持待审批。QC-DETR E2 已只读导入，缺少原始工件，级别为 `imported_unverified`。[数据、费用和证据路径](AXIOM_RESEARCH_VALIDATION.md)
+
+Windows 与 WSL2 的离线构建通过，Windows `npm run check` 通过。WSL2 单并发 `npm run test:ml` 退出码 0，全量 **152/152**（Python 18、Node 主批 114、机制批 3、Pi 原生 17）。对账验收中 `wp04-qsQTjK/2` 从 `intent` 进入 `not_started`，再次执行后完成评分。`wp04-AHbMkO/2` 从 `started` 进入 `unknown`，保留训练预留和截止时间。日志见 `private/wp112/build-wsl.log`、`private/wp112/test-wsl.log`。
+
+Windows 首轮单并发 `npm run test:ml` 退出码 1，全量 **151/152**（Python 17/18、Node 主批 114/114、机制批 3/3、Pi 原生 17/17）。首轮与 WSL2 构建并行，既有 `test_cli_cannot_select_final_test_split` 触发原 Python 子进程时限。Windows Python 批随后单独复跑，保持原限时和断言，18/18 通过。Windows 两条对账任务为 `wp04-LlSApG` 和 `wp04-u3Ftpr`。原始构建、全量及复跑日志见 `private/wp112/build-windows.log`、`private/wp112/test-windows.log`、`private/wp112/test-windows-python-recheck.log`。
+
 ## WP-11.1 科研消融与复现
 
 真实 SciFact 计划完成六组控制对照。BM25 单元提交后强杀进程，新进程沿用 `wp04-h9r2Rd`，操作 1 未重跑，共结算 6 个检索操作。模型对缩小 Sparse 与 Dense 候选深度的两个方向性预测均未获得支持。Dense-only 和 Dense Top‑15 RRF 构成 Pareto 前沿。固定向量重建索引后，六组逐查询排名与贡献精确一致。

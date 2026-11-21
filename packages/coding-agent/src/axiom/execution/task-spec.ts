@@ -76,6 +76,8 @@ const current = Type.Object(
 		parameters: Type.Optional(parameterRanges),
 		// 主机在审批时选择固定起点，搜索工具不能改写该字段。
 		starting_model: Type.Optional(Type.Literal("shallow_tanh")),
+		// 研究矩阵逐种子审批初始化。候选工具仍只接受学习率。
+		initialization_seed: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647 })),
 		max_revisions: Type.Integer({ minimum: 0, maximum: 3 }),
 	},
 	{ additionalProperties: false },
@@ -86,6 +88,7 @@ const staged = Type.Object(
 		...current.properties,
 		version: Type.Literal(3),
 		starting_model: Type.Optional(Type.Never()),
+		initialization_seed: Type.Optional(Type.Never()),
 		budget: Type.Object(
 			{
 				...common.budget.properties,

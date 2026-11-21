@@ -9,20 +9,28 @@ interface Stats {
 	mean: number;
 	min: number;
 	max: number;
+	stddev: number | null;
 	n: number;
 }
 interface Difference {
 	absolute: number | null;
 	relative: number | null;
 	pairs: number;
+	by_seed?: { seed: number | null; repeat: number; absolute: number }[];
 }
 
 function statistics(values: number[]): Stats | null {
+	const mean = values.reduce((a, b) => a + b, 0) / values.length;
 	return values.length
 		? {
-				mean: values.reduce((a, b) => a + b, 0) / values.length,
+				mean,
 				min: Math.min(...values),
 				max: Math.max(...values),
+				// 单次测量没有样本标准差，三种子也只报告描述统计。
+				stddev:
+					values.length > 1
+						? Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1))
+						: null,
 				n: values.length,
 			}
 		: null;
@@ -36,7 +44,7 @@ function metric(sample: Sample, key: string): number | null {
 
 /** 只配对相同重复号和种子，控制关系不成立时不给差值。 */
 export function paired(rows: Sample[], baseline: Sample[], key: string): Difference {
-	const pairs = rows.flatMap((row): [number, number][] => {
+	const pairs = rows.flatMap((row): { value: number; baseline: number; seed: number | null; repeat: number }[] => {
 		const ref = baseline.find(
 			(other) =>
 				other.cell.repeat === row.cell.repeat &&
@@ -45,11 +53,20 @@ export function paired(rows: Sample[], baseline: Sample[], key: string): Differe
 		);
 		const left = metric(row, key);
 		const right = ref && metric(ref, key);
-		return left !== null && right !== null && right !== undefined ? [[left, right]] : [];
+		return left !== null && right !== null && right !== undefined
+			? [{ value: left, baseline: right, seed: row.cell.seed, repeat: row.cell.repeat }]
+			: [];
 	});
-	const absolute = statistics(pairs.map(([x, y]) => x - y))?.mean ?? null;
-	const mean = statistics(pairs.map(([, y]) => y))?.mean;
-	return { absolute, relative: absolute !== null && mean ? absolute / mean : null, pairs: pairs.length };
+	const absolute = statistics(pairs.map(({ value, baseline }) => value - baseline))?.mean ?? null;
+	const mean = statistics(pairs.map(({ baseline }) => baseline))?.mean;
+	return {
+		absolute,
+		relative: absolute !== null && mean ? absolute / mean : null,
+		pairs: pairs.length,
+		...(pairs.length
+			? { by_seed: pairs.map(({ seed, repeat, baseline, value }) => ({ seed, repeat, absolute: value - baseline })) }
+			: {}),
+	};
 }
 
 export function researchReport(
@@ -68,6 +85,7 @@ export function researchReport(
 				completed: rows.filter(({ status }) => status === "completed").length,
 				failed: rows.filter(({ status }) => status === "failed").length,
 				unknown: rows.filter(({ status }) => status === "unknown").length,
+				not_started: rows.filter(({ status }) => status === "not_started").length,
 			},
 			metrics: Object.fromEntries(
 				[...new Set([...plan.metrics, "compute-ms"])].map((key) => {
@@ -100,14 +118,28 @@ export function researchReport(
 		};
 	});
 	// 复用 WP-06.3 的真正非支配算法，完整重复才进入组均值比较。
-	const objectives: Objective[] = [
-		{ metric: "ndcg10", direction: "maximize", min: 0, max: 1, target: null },
-		{ metric: "recall5", direction: "maximize", min: 0, max: 1, target: null },
-		{ metric: "p95-ms", direction: "minimize", min: 0, max: Number.MAX_VALUE, target: null, resolution: 0.01 },
-	];
+	const objectives: Objective[] =
+		plan.domain === "tiny" && plan.version === 2
+			? [
+					{ metric: "accuracy", direction: "maximize", min: 0, max: 1, target: null },
+					{ metric: "loss", direction: "minimize", min: 0, max: Number.MAX_VALUE, target: null },
+					{ metric: "compute-ms", direction: "minimize", min: 0, max: Number.MAX_VALUE, target: null },
+				]
+			: [
+					{ metric: "ndcg10", direction: "maximize", min: 0, max: 1, target: null },
+					{ metric: "recall5", direction: "maximize", min: 0, max: 1, target: null },
+					{
+						metric: "p95-ms",
+						direction: "minimize",
+						min: 0,
+						max: Number.MAX_VALUE,
+						target: null,
+						resolution: 0.01,
+					},
+				];
 	const points: ParetoPoint[] = groups.flatMap((group) => {
 		const values = objectives.map(({ metric }) => group.metrics[metric]?.observed?.mean);
-		return plan.domain === "scifact" &&
+		return (plan.domain === "scifact" || plan.version === 2) &&
 			group.counts.completed === plan.repeats &&
 			values.every((value) => value !== undefined)
 			? [
@@ -139,6 +171,7 @@ export function researchReport(
 		groups,
 		hypotheses,
 		warnings,
+		compute_ms: samples.reduce((total, sample) => total + (sample.compute_ms ?? 0), 0),
 		pareto: { objectives, frontier },
 		audits,
 	};
@@ -150,19 +183,19 @@ export function researchReport(
 		"",
 		`Research question ${JSON.stringify(plan.question)}`,
 		"",
-		`Domain ${plan.domain}, baseline ${plan.baseline}, repeats ${plan.repeats}, seed ${plan.seed ?? "deterministic"}`,
+		`Domain ${plan.domain}, baseline ${plan.baseline}, repeats ${plan.repeats}, seeds ${plan.version === 2 && plan.seeds.length ? plan.seeds.join(", ") : (plan.seed ?? "deterministic")}`,
 		"",
 		"## Controlled comparisons",
 		"",
 		...groups.flatMap(({ condition, counts, metrics, evidence }) => [
 			`### ${condition.id}`,
 			"",
-			`Reference ${condition.reference ?? "none"}, factor ${condition.factor}, completed ${counts.completed}/${counts.planned}, failed ${counts.failed}, unknown ${counts.unknown}.`,
+			`Reference ${condition.reference ?? "none"}, factor ${condition.factor}, completed ${counts.completed}/${counts.planned}, failed ${counts.failed}, unknown ${counts.unknown}, not started ${counts.not_started}.`,
 			`Configuration \x60${JSON.stringify(condition.config)}\x60`,
 			"",
 			...Object.entries(metrics).map(
 				([key, value]) =>
-					`- ${key} mean ${value.observed?.mean ?? "unknown"}, range ${value.observed ? `${value.observed.min}–${value.observed.max}` : "unknown"}, paired delta ${value.delta?.absolute ?? "unknown"}, relative ${value.delta?.relative ?? "unknown"}`,
+					`- ${key} mean ${value.observed?.mean ?? "unknown"}, SD ${value.observed?.stddev ?? "unknown"}, range ${value.observed ? `${value.observed.min}–${value.observed.max}` : "unknown"}, paired delta ${value.delta?.absolute ?? "unknown"}, relative ${value.delta?.relative ?? "unknown"}`,
 			),
 			...evidence.map(
 				(proof) => `- Task/run ${proof.task_id}/${proof.run_id}, SHA-256 ${proof.evidence[0]?.sha256}`,

@@ -9,9 +9,11 @@ import { auditMatrix } from "./audit.ts";
 import { identity, type Runtime } from "./environment.ts";
 import { verifySamples } from "./evidence.ts";
 import { loadPlan, readSamples, runMatrix } from "./execute.ts";
-import { freeze, type Hypothesis } from "./plan.ts";
+import { comparisonRefusal, type ImportedRun, importResearch } from "./import.ts";
+import { freeze, type Hypothesis, multiSeed } from "./plan.ts";
 import { propose } from "./planner.ts";
 import { researchReport } from "./report.ts";
+import { approveRevision, proposeRevision } from "./revision.ts";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -30,9 +32,27 @@ async function main(): Promise<void> {
 			agent: { type: "boolean" },
 			interrupt: { type: "boolean" },
 			retry: { type: "boolean" },
+			seeds: { type: "string" },
+			manifest: { type: "string" },
+			"source-root": { type: "string" },
+			against: { type: "string" },
+			"against-sha": { type: "string" },
 		},
 	});
 	const [mode] = positionals;
+	if (mode === "import") {
+		// 清单可位于 AXIOM 私有目录，外部项目保持只读。
+		if (!values.manifest || !values["source-root"] || !values.sha || !values.out)
+			throw new Error("Import needs --manifest, --source-root, --sha and --out");
+		const out = resolve(values.out);
+		await json(
+			out,
+			"import.json",
+			await importResearch(resolve(values["source-root"]), resolve(values.manifest), values.sha.toLowerCase()),
+		);
+		console.log(JSON.stringify(await digest(out, "import.json")));
+		return;
+	}
 	if (values.retry && mode !== "feedback") throw new Error("--retry is only valid for feedback");
 	if (positionals.length !== 1) throw new Error("Choose plan, run, report or audit");
 	const vectorSha = values["vector-sha"]?.toLowerCase();
@@ -57,7 +77,10 @@ async function main(): Promise<void> {
 			values.interrupt
 		)
 			throw new Error("Plan needs --domain scifact|tiny and --question");
-		const controlled = await identity(runtime, domain);
+		// 多种子完全由宿主指定，模型不会获得种子写权限。
+		const seeds = values.seeds?.split(",").map(Number);
+		if (values.seeds && !/^\d+,\d+,\d+$/.test(values.seeds)) throw new Error("Provide three comma-separated seeds");
+		const controlled = await identity(runtime, domain, seeds ? 2 : 1);
 		const out = resolve(values.out ?? join(repo, "private", "research"));
 		await mkdir(out, { recursive: true });
 		const root = await mkdtemp(join(out, "plan-"));
@@ -88,14 +111,94 @@ async function main(): Promise<void> {
 			hypotheses = revision.hypotheses;
 			proposalSha = (await digest(root, "proposal-revision.json")).sha256;
 		}
-		await json(root, "plan.json", freeze(domain, values.question, controlled, hypotheses, proposalSha));
+		const plan = freeze(domain, values.question, controlled, hypotheses, proposalSha);
+		await json(root, "plan.json", seeds ? multiSeed(plan, seeds) : plan);
 		console.log(JSON.stringify({ root, sha: (await digest(root, "plan.json")).sha256 }));
 		return;
 	}
 	const sha = values.sha?.toLowerCase();
-	if (!values.plan || !sha || !/^[a-f0-9]{64}$/.test(sha) || values.agent || values.domain || values.question)
+	if (
+		!values.plan ||
+		!sha ||
+		!/^[a-f0-9]{64}$/.test(sha) ||
+		values.agent ||
+		values.domain ||
+		values.question ||
+		values.seeds
+	)
 		throw new Error("Execution and verification require --plan and --sha");
 	const root = resolve(values.plan);
+	if (mode === "compare") {
+		// 两个来源都按批准摘要读取，导入日志分数不会当成原生独立评分。
+		if (!values.against || !values["against-sha"])
+			throw new Error("Compare needs --against directory and --against-sha");
+		const plan = await loadPlan(root, sha);
+		const samples = readSamples(root, plan, sha);
+		await verifySamples(runtime, plan, sha, samples);
+		const imported = await file(resolve(values.against), "import.json");
+		if (sha256(imported) !== values["against-sha"].toLowerCase()) throw new Error("Import receipt digest mismatch");
+		const other = JSON.parse(imported.toString()) as ImportedRun;
+		const differences = comparisonRefusal(
+			{
+				dataset: plan.controlled.dataset,
+				implementation: plan.controlled.implementation,
+				protocol: plan.controlled.evaluation,
+				split: plan.domain === "tiny" ? "validation" : "development",
+			},
+			other.comparison,
+		);
+		const comparable = !differences.length && other.status !== "imported_unverified";
+		const comparison = {
+			comparable,
+			differences,
+			plan: sha,
+			imported: {
+				run_id: other.manifest.run_id,
+				evidence: other.artifacts,
+				status: other.status,
+				metrics_status: other.metrics_status,
+				metrics: other.manifest.metrics,
+			},
+			native: samples.map(({ cell, status, task_id, run, evidence }) => ({
+				condition: cell.condition.id,
+				seed: cell.seed,
+				status,
+				task_id,
+				run_id: run?.id,
+				metrics: run?.validation,
+				evidence,
+			})),
+		};
+		if (values.out) await json(resolve(values.out), "comparison.json", comparison);
+		console.log(JSON.stringify({ comparable, differences, import_metrics: other.metrics_status }));
+		return;
+	}
+	// 生成只写待审批目录，执行入口需要单独批准后的计划摘要。
+	if (mode === "revise") {
+		console.log(
+			JSON.stringify(
+				await proposeRevision(runtime, root, sha, resolve(values.out ?? join(repo, "private", "research"))),
+			),
+		);
+		return;
+	}
+	if (mode === "approve") {
+		console.log(JSON.stringify({ root, sha: await approveRevision(root, sha) }));
+		return;
+	}
+	if (mode === "reconcile") {
+		await runMatrix(runtime, root, sha, false, "reconcile");
+		console.log(
+			JSON.stringify(
+				readSamples(root, await loadPlan(root, sha), sha).map(({ cell, status, reason }) => ({
+					id: cell.id,
+					status,
+					reason,
+				})),
+			),
+		);
+		return;
+	}
 	if (mode === "run" || mode === "worker") {
 		if (values.interrupt && mode === "run") {
 			// 父进程在固定同步点强杀；第二次普通 run 可在独立进程恢复。

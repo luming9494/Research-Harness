@@ -11,7 +11,7 @@ import type { DenseSource } from "../rag/dense.ts";
 import { hybridProtocol, implementationSha, ragDomain } from "../rag/domain.ts";
 import { sparseControl } from "../rag/hybrid.ts";
 import { assets } from "../rag/scifact.ts";
-import type { Domain, Plan } from "./plan.ts";
+import { type Domain, type Plan, seedFor } from "./plan.ts";
 
 export interface Runtime {
 	repo: string;
@@ -20,7 +20,11 @@ export interface Runtime {
 	vectors?: DenseSource;
 }
 
-export async function identity(runtime: Runtime, domain: Domain): Promise<Plan["controlled"]> {
+export async function identity(
+	runtime: Runtime,
+	domain: Domain,
+	version: Plan["version"] = 1,
+): Promise<Plan["controlled"]> {
 	const { repo } = runtime;
 	const node = [process.platform, process.arch, process.version];
 	if (domain === "scifact") {
@@ -44,19 +48,38 @@ export async function identity(runtime: Runtime, domain: Domain): Promise<Plan["
 		sha256(JSON.stringify(await Promise.all(paths.map((path) => digest(repo, path)))));
 	return {
 		dataset: await hashFiles(["examples/tiny-ml-eval/common.py"]),
-		implementation: await hashFiles([
-			...[
-				"train",
-				"supervise",
-				"evaluate",
-				"validate_only",
-				"common",
-				"review_candidate",
-				"experiment",
-				"checks",
-			].map((name) => `examples/tiny-ml-eval/${name}.py`),
-			"packages/coding-agent/src/axiom/execution/task-executor.ts",
-		]),
+		implementation: sha256(
+			JSON.stringify(
+				await Promise.all(
+					[
+						...[
+							"train",
+							"supervise",
+							"evaluate",
+							"validate_only",
+							"common",
+							"review_candidate",
+							"experiment",
+							"checks",
+						].map((name) => `examples/tiny-ml-eval/${name}.py`),
+						"packages/coding-agent/src/axiom/execution/task-executor.ts",
+					].map(async (path): Promise<Awaited<ReturnType<typeof digest>>> => {
+						const asset = await digest(repo, path);
+						// 旧协议以已审阅执行器身份核对，仅接受本阶段已知的种子扩展或原版字节。
+						if (
+							version === 1 &&
+							asset.sha256 === "a23f397476eaa405ed7e52914ed0f2601bd0f7e5f1c7fd36d6a120e94711a1a9"
+						)
+							return {
+								...asset,
+								sha256: "8de973a4f379e1a03b98d3467b74fd3c814b913ca36110d192fe725a3749f43d",
+								bytes: 32644,
+							};
+						return asset;
+					}),
+				),
+			),
+		),
 		model: await hashFiles(["examples/tiny-ml-task/shallow-tanh.py", "examples/tiny-ml-task/config.json"]),
 		environment: sha256(JSON.stringify([node, probe.stdout.trim()])),
 		evaluation: "tiny-validation-v1",
@@ -88,6 +111,7 @@ export function specFor(plan: Plan, sha: string, repeat: number): ExperimentTask
 				max_revisions: 0,
 				rules: TASK_RULES,
 				starting_model: "shallow_tanh",
+				...(plan.version === 2 ? { initialization_seed: seedFor(plan, repeat) } : {}),
 				parameters: { learning_rate: { min: 0.01, max: 0.08 } },
 				objective: { metric: "accuracy", direction: "maximize", target: null },
 			} as ExperimentTaskSpec)

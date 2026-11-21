@@ -2,7 +2,7 @@
 import { readdir, realpath } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { RunResult } from "../../packages/coding-agent/src/axiom/execution/experiment-domain.ts";
+import type { RunResult, WorkerOperation } from "../../packages/coding-agent/src/axiom/execution/experiment-domain.ts";
 import { TaskController } from "../../packages/coding-agent/src/axiom/execution/task-controller.ts";
 import { type Digest, digest, file, sha256 } from "../bench/io.ts";
 import { openExperimentLedger } from "../durable/experiment-ledger.ts";
@@ -12,7 +12,7 @@ import { type Cell, cells, type Plan, validatePlan } from "./plan.ts";
 
 export interface Sample {
 	cell: Cell;
-	status: "completed" | "failed" | "unknown";
+	status: "completed" | "failed" | "unknown" | "not_started";
 	task_id: string | null;
 	run: RunResult | null;
 	operation_ids: number[];
@@ -31,6 +31,24 @@ export async function loadPlan(root: string, sha: string): Promise<Plan> {
 	const raw = await file(root, "plan.json");
 	if (sha256(raw) !== sha) throw new Error("Research plan digest mismatch");
 	const plan = validatePlan(JSON.parse(raw.toString()));
+	if (plan.version === 2 && plan.lineage) {
+		// 候选、审批和两项来源摘要都必须同时存在，单独复制计划不能通过执行门槛。
+		const candidate = await file(root, "candidate.json");
+		const approval = JSON.parse((await file(root, "approval.json")).toString()) as {
+			candidate_sha256?: string;
+			plan_id?: string;
+		};
+		const pending = JSON.parse(candidate.toString()) as { approval?: string; plan?: unknown };
+		if (
+			approval.candidate_sha256 !== sha256(candidate) ||
+			approval.plan_id !== plan.id ||
+			pending.approval !== "pending" ||
+			JSON.stringify(pending.plan) !== JSON.stringify(plan) ||
+			sha256(await file(root, "source.json")) !== plan.lineage.source ||
+			sha256(await file(root, "revision-receipt.json")) !== plan.lineage.receipt
+		)
+			throw new Error("Revision approval or evidence changed");
+	}
 	if (plan.proposal_sha256) {
 		// 批准同时绑定模型修订稿和结构化假设。
 		const proposal = await file(root, "proposal-revision.json");
@@ -59,6 +77,13 @@ function get<T>(db: DatabaseSync, id: string): T | undefined {
 
 function put(db: DatabaseSync, id: string, value: unknown): void {
 	db.prepare("INSERT INTO records VALUES (?, ?)").run(id, JSON.stringify(value));
+}
+
+// 只有握手前的操作或已经结算的只读审查能证明没有实验副作用。
+export function canResumeUnstarted(operations: WorkerOperation[], readOnly: (op: WorkerOperation) => boolean): boolean {
+	return operations.every(
+		(op) => op.status === "intent" || op.status === "not_started" || (op.status === "completed" && readOnly(op)),
+	);
 }
 
 export function readSamples(root: string, plan: Plan, sha: string): Sample[] {
@@ -91,11 +116,10 @@ export async function runMatrix(
 	directory: string,
 	sha: string,
 	stopAfterCell = false,
+	mode: "execute" | "reconcile" = "execute",
 ): Promise<void> {
 	const root = await realpath(directory);
 	const plan = await loadPlan(root, sha);
-	if (JSON.stringify(await identity(runtime, plan.domain)) !== JSON.stringify(plan.controlled))
-		throw new Error("Frozen execution environment changed");
 	const guard = new DatabaseSync(join(root, "matrix-owner.sqlite"));
 	try {
 		guard.exec("BEGIN IMMEDIATE");
@@ -103,6 +127,10 @@ export async function runMatrix(
 		try {
 			const prior = get<string>(db, "plan");
 			if (prior === undefined) {
+				if (mode === "reconcile") throw new Error("Matrix has no original ledger to reconcile");
+				// 初始执行验证运行环境。已有计划在证据核验中执行同一检查一次。
+				if (JSON.stringify(await identity(runtime, plan.domain, plan.version)) !== JSON.stringify(plan.controlled))
+					throw new Error("Frozen execution environment changed");
 				db.exec("BEGIN IMMEDIATE");
 				try {
 					put(db, "plan", sha);
@@ -120,14 +148,22 @@ export async function runMatrix(
 			const scheduled = cells(plan, sha);
 			for (let repeat = 1; repeat <= plan.repeats; repeat++) {
 				const batch = scheduled.filter((cell) => cell.repeat === repeat);
-				if (batch.every(({ id }) => get(db, id) !== undefined)) continue;
-				if (deadline <= Date.now()) return;
+				if (
+					mode === "execute" &&
+					batch.every(({ id }) => {
+						const sample = get<Sample>(db, id);
+						return sample && sample.status !== "not_started";
+					})
+				)
+					continue;
+				if (mode === "execute" && deadline <= Date.now()) return;
 				const spec = specFor(plan, sha, repeat);
 				const specSha = sha256(JSON.stringify(spec));
 				const key = `repeat-${repeat}`;
 				const domain = adapter(runtime, plan);
 				const python = executable(runtime, plan.domain);
 				const link = get<Link>(db, key);
+				if (mode === "reconcile" && !link) continue;
 				if (link && link.spec_sha256 !== specSha) throw new Error("Linked TaskSpec identity changed");
 				const task = link
 					? await TaskController.resume(runtime.repo, python, link.task, openExperimentLedger, () => {}, domain)
@@ -149,13 +185,52 @@ export async function runMatrix(
 					if (JSON.stringify(task.snapshot().task) !== JSON.stringify(domain.validateSpec(spec)))
 						throw new Error("Linked task no longer matches frozen plan");
 					for (const [index, cell] of batch.entries()) {
-						if (get(db, cell.id)) continue;
+						const prior = get<Sample>(db, cell.id);
+						if (prior?.status === "completed" || (mode === "execute" && prior && prior.status !== "not_started"))
+							continue;
 						const runId = index === 0 ? "baseline" : `exp-${index}`;
 						const observed = (): boolean =>
 							task.contextState().evaluated.some(({ id }) => id === runId) ||
 							task.snapshot().experiments.some(({ id }) => id === runId);
+						// 原生候选 ID 按准入顺序分配，不能把前一未确认单元的编号交给后续条件。
+						const next =
+							index === 0 ||
+							(task.contextState().evaluated.some(({ id }) => id === "baseline") &&
+								task.snapshot().experiments.length === index - 1);
 						let error: string | null = null;
-						if (!observed() && !task.stopped && Date.now() < deadline) {
+						if (mode === "reconcile") {
+							const sample = await collect(runtime, plan, cell, task, runId, null);
+							const state = task.contextState();
+							const operations = state.operations.filter((op) => op.runId === runId);
+							if (
+								prior &&
+								((prior.task_id !== null && prior.task_id !== sample.task_id) ||
+									prior.operation_ids.some((id) => !sample.operation_ids.includes(id)))
+							)
+								throw new Error("Matrix and native operation records conflict");
+							if (
+								sample.status !== "completed" &&
+								!task.stopped &&
+								!observed() &&
+								canResumeUnstarted(
+									operations,
+									(op): boolean => plan.domain === "tiny" && op.script === "review_candidate.py",
+								)
+							) {
+								sample.status = "not_started";
+								sample.reason = "native_admission_not_started";
+							} else if (sample.status === "unknown" && prior?.status === "failed" && !operations.length) {
+								continue;
+							}
+							if (JSON.stringify(prior) !== JSON.stringify(sample))
+								db.prepare(
+									"INSERT INTO records VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+								).run(cell.id, JSON.stringify(sample));
+							continue;
+						}
+						// 先决单元尚未解决时保留未启动状态，后续对账仍可看到原证据。
+						if (!next && !observed() && prior?.status === "not_started") continue;
+						if (next && !observed() && !task.stopped && Date.now() < deadline) {
 							try {
 								const signal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
 								if (!index) await task.invoke("baseline", {}, signal);
@@ -175,7 +250,9 @@ export async function runMatrix(
 							}
 						}
 						const sample = await collect(runtime, plan, cell, task, runId, error);
-						put(db, cell.id, sample);
+						if (prior?.status === "not_started")
+							db.prepare("UPDATE records SET payload=? WHERE id=?").run(JSON.stringify(sample), cell.id);
+						else put(db, cell.id, sample);
 						if (stopAfterCell && sample.status === "completed") {
 							// 父进程在账本确认后强杀此进程，故意避开正常清理路径。
 							await task.checkpoint();
@@ -187,7 +264,13 @@ export async function runMatrix(
 							});
 						}
 					}
-					if (!task.stopped) await task.stop("user_finished");
+					// 若依赖未解决，保留原任务状态以供后续对账，避免人为盖上完成终态。
+					if (
+						mode === "execute" &&
+						!task.stopped &&
+						batch.every(({ id }) => get<Sample>(db, id)?.status !== "not_started")
+					)
+						await task.stop("user_finished");
 				} finally {
 					await task.closeLedger();
 				}
@@ -226,7 +309,9 @@ async function collect(
 			run,
 			operation_ids,
 			evidence: [],
-			compute_ms: null,
+			compute_ms: operations.some((op) => "elapsedMs" in op)
+				? operations.reduce((sum, op) => sum + ("elapsedMs" in op ? op.elapsedMs : 0), 0)
+				: null,
 			status:
 				unknown || (!operations.length && !error && !summary.experiments.some(({ id }) => id === runId))
 					? "unknown"

@@ -9,7 +9,7 @@ import type { Cell, Plan } from "./plan.ts";
 
 // 摘要校验后与权威原生账本交叉核验，禁止把手写的样本字段当作运行结果。
 export async function verifySamples(runtime: Runtime, plan: Plan, sha: string, samples: Sample[]): Promise<void> {
-	if (JSON.stringify(await identity(runtime, plan.domain)) !== JSON.stringify(plan.controlled))
+	if (JSON.stringify(await identity(runtime, plan.domain, plan.version)) !== JSON.stringify(plan.controlled))
 		throw new Error("Cannot compare samples from a changed environment");
 	const checkpoints = new Map<string, TaskCheckpoint>();
 	for (const sample of samples) {

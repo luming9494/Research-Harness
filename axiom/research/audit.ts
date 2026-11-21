@@ -18,6 +18,7 @@ export interface Audit {
 	run: "passed" | "not_run";
 	evaluate: "passed";
 	train: "passed" | "mismatch" | "not_run";
+	evidence_status: "evaluation_reproduced" | "training_reproduced";
 	scope: string;
 	observed_ms: number;
 	evidence: string[];
@@ -101,7 +102,7 @@ export async function auditMatrix(runtime: Runtime, plan: Plan, sha: string, sam
 						? `Fresh training differed on ${differences.join(", ")}. Exact equality is required for Tiny fixed-seed repeats.`
 						: repeated
 							? "Fresh training from fixed architecture, config, dataset and seed matched independent accuracy, loss and sample count."
-							: "Independent checkpoint re-evaluation. Matching fresh training evidence is only attributed to repeat cells.",
+							: "Independent checkpoint re-evaluation. Training reproduction requires a fresh repeat with the same seed.",
 			};
 		}
 		audits.push({
@@ -110,6 +111,7 @@ export async function auditMatrix(runtime: Runtime, plan: Plan, sha: string, sam
 			run_id: run.id,
 			...levels,
 			evaluate: "passed",
+			evidence_status: levels.train === "passed" ? "training_reproduced" : "evaluation_reproduced",
 			observed_ms: performance.now() - started,
 			evidence: sample.evidence.map(({ sha256 }) => sha256),
 		});

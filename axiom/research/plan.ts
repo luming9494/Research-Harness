@@ -76,7 +76,21 @@ const schema = Type.Object(
 	{ additionalProperties: false },
 );
 
-export type Plan = Static<typeof schema>;
+// v2 既支持宿主审批的种子批次，也支持来自上一轮证据的单因素修订。
+const nextSchema = Type.Object(
+	{
+		...schema.properties,
+		version: Type.Literal(2),
+		repeats: Type.Integer({ minimum: 1, maximum: 3 }),
+		seeds: Type.Array(Type.Integer({ minimum: 0, maximum: 2147483647 }), { maxItems: 3, uniqueItems: true }),
+		lineage: Type.Optional(
+			Type.Object({ parent: hash, source: hash, receipt: hash }, { additionalProperties: false }),
+		),
+	},
+	{ additionalProperties: false },
+);
+
+export type Plan = Static<typeof schema> | Static<typeof nextSchema>;
 export type Condition = Static<typeof condition>;
 export type Domain = Plan["domain"];
 export interface Cell {
@@ -133,18 +147,30 @@ export function comparable(row: Condition, ref: Condition): boolean {
 }
 
 export function validatePlan(raw: unknown): Plan {
-	if (!Check(schema, raw)) throw new Error("Invalid or unfrozen research plan");
+	if (!Check(schema, raw) && !Check(nextSchema, raw)) throw new Error("Invalid or unfrozen research plan");
 	const { conditions: rows, domain } = raw;
 	const catalog = conditions[domain];
 	const primary = domain === "scifact" ? "ndcg10" : "accuracy";
+	// 初版白名单沿用原顺序。后续 SciFact 矩阵只允许修改既有 RRF 单因素。
+	const revision = raw.version === 2 && domain === "scifact" && raw.lineage;
+	const approved = revision
+		? rows.length === 3 &&
+			JSON.stringify(rows.slice(0, 2)) === JSON.stringify([catalog[0], catalog[2]]) &&
+			rows[2].id === "revised" &&
+			["rrf-k", "dense-depth", "sparse-depth"].includes(rows[2].factor)
+		: JSON.stringify(rows) === JSON.stringify(catalog);
 	if (
-		JSON.stringify(rows) !== JSON.stringify(catalog) ||
+		!approved ||
 		raw.baseline !== catalog[0].id ||
 		raw.seed !== (domain === "tiny" ? 42 : null) ||
 		raw.controlled.evaluation !== (domain === "tiny" ? "tiny-validation-v1" : "scifact-development-v2") ||
-		raw.repeats !== (domain === "tiny" ? 2 : 1) ||
+		(raw.version === 1
+			? raw.repeats !== (domain === "tiny" ? 2 : 1)
+			: domain === "tiny"
+				? !!raw.lineage || raw.seeds.length !== raw.repeats || raw.repeats !== 3
+				: !raw.lineage || raw.seeds.length !== 0 || raw.repeats !== 1 || raw.proposal_sha256 !== null) ||
 		raw.hypotheses.some(
-			(item) => item.metric !== primary || !catalog.slice(1).some(({ id }) => id === item.comparison),
+			(item) => item.metric !== primary || !rows.slice(1).some(({ id }) => id === item.comparison),
 		) ||
 		(raw.proposal_sha256 !== null &&
 			(raw.hypotheses.length < 2 ||
@@ -165,9 +191,9 @@ export function freeze(
 	controlled: Plan["controlled"],
 	hypotheses: Hypothesis[],
 	proposalSha: string | null,
-): Plan {
+): Static<typeof schema> {
 	// 预算和对照由宿主固化，计划中没有可执行脚本字段。
-	return validatePlan({
+	const plan = {
 		version: 1,
 		id: randomUUID(),
 		status: "frozen",
@@ -186,7 +212,26 @@ export function freeze(
 				: { wall_seconds: 900, compute_seconds: 260, training_steps: 0 },
 		metrics: domain === "tiny" ? ["accuracy", "loss", "compute-ms"] : ["ndcg10", "recall5", "p95-ms", "index-bytes"],
 		expected_evidence: ["ledger", "independent-score", "artifact-manifest"],
+	};
+	if (!Check(schema, plan)) throw new Error("Invalid frozen research plan");
+	validatePlan(plan);
+	return plan;
+}
+
+// 每个种子独立拥有三组对照及原生预算切片。
+export function multiSeed(plan: Static<typeof schema>, seeds: number[]): Plan {
+	if (plan.domain !== "tiny") throw new Error("Only Tiny supports multi-seed plans");
+	return validatePlan({
+		...plan,
+		version: 2,
+		seeds,
+		repeats: 3,
+		budgets: { wall_seconds: 1800, compute_seconds: 1200, training_steps: 732 },
 	});
+}
+
+export function seedFor(plan: Plan, repeat: number): number | null {
+	return plan.version === 2 && plan.domain === "tiny" ? plan.seeds[repeat - 1] : plan.seed;
 }
 
 // 重复号和种子参与身份，即使同配置同种子复现也保留独立样本。
@@ -195,12 +240,13 @@ export function cells(plan: Plan, planSha: string): Cell[] {
 		plan.conditions.map((condition): Cell => {
 			const repeat = index + 1;
 			const id = `${condition.id}-r${repeat}`;
+			const seed = seedFor(plan, repeat);
 			return {
 				id,
 				condition,
 				repeat,
-				seed: plan.seed,
-				fingerprint: cellFingerprint(plan, planSha, id, plan.seed, condition.config),
+				seed,
+				fingerprint: cellFingerprint(plan, planSha, id, seed, condition.config),
 			};
 		}),
 	).flat();

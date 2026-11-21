@@ -30,6 +30,7 @@
 			"axiom/evolution/**/*.ts",
 			"axiom/release/**/*.ts",
 			"axiom/rag/**/*.ts",
+			"axiom/research/**/*.ts",
 			"scripts/model-catalog-protocol.ts",
 			"scripts/model-catalog-protocol.test.ts",
 			"packages/*/src/**/*.ts",

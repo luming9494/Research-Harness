@@ -1,5 +1,19 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-11.1 科研消融与复现
+
+真实 SciFact 计划完成六组控制对照。BM25 单元提交后强杀进程，新进程沿用 `wp04-h9r2Rd`，操作 1 未重跑，共结算 6 个检索操作。模型对缩小 Sparse 与 Dense 候选深度的两个方向性预测均未获得支持。Dense-only 和 Dense Top‑15 RRF 构成 Pareto 前沿。固定向量重建索引后，六组逐查询排名与贡献精确一致。
+
+Tiny CPU 三个学习率各有两次真实训练，六个 checkpoint 独立评价通过。相同种子下各配置的准确率、loss、样本数精确一致。SciFact 96.821 秒、Tiny 97.041 秒为原生计算结算。四次真实 Pi 请求中三次完成用量，合计已知 3,880 Token、估计 USD 0.001564944，一次反馈失败用量未知。
+
+最终证据目录为 `private/wp111/evidence/scifact` 和 `private/wp111/evidence/tiny`。完整配置、指标、失效假设、命令和复现等级见 [科研消融报告](AXIOM_ABLATION_REPRODUCIBILITY.md)。
+
+Windows 与 WSL2 的 `npm run build:offline` 均成功。Windows 的 `npm run check`、`node --conditions=source --experimental-strip-types --test tests/axiom/research.test.mjs` 和单并发 `npm run test:ml` 分别通过，定向 7/7，全量 147/147（Python 18、Node 主批 109、机制批 3、Pi 原生 17）。原始日志位于 `private/wp111/build-windows.log`、`private/wp111/build-wsl.log` 和 `private/wp111/test-windows.log`。
+
+Windows 在隔离副本中破坏排名摘要后，原计划恢复被拒绝，报告 `Artifact digest changed: retrieval/baseline/rankings.json`。预算定向用例观察到可信 AST 审查可结算零训练步，训练预算不足时无训练预留，已提交记录在重跑后保持不变。
+
+WSL2 执行 `AXIOM_ML_TEST_CONCURRENCY=1 npm run test:ml`，最终退出码 0，全量 **147/147**（Python 18、Node 主批 109、机制批 3、Pi 原生 17）。首次为 146/147，新预算用例误将零训练步的可信 AST 审查计为训练准入。改为直接核对权威账本中的训练预留、终止原因并完整复跑，已有断言和限时保留。两轮日志见 `private/wp111/test-wsl.log` 和 `private/wp111/test-wsl-final.log`。
+
 ## WP-10.2 Hybrid 科研检索与可信重放
 
 `RAG-HYBRID-01` 使用固定 BGE Small v1.5 ONNX 与 SciFact 数据，真实 DeepSeek Flash 两轮参数决策。强杀 Pi 后恢复同一任务，四条已核验操作无重跑，只新增第五条。开发 nDCG@10 优胜项为 exp-4 的 0.556479。留出 nDCG@10 为 0.532930，BM25 为 0.507739，Dense 为 0.534276。正式双轴均 100，离线重放 9 组、5,245 条查询并核验 37 个文件。[模型、分片、证据与完整对照](AXIOM_HYBRID_RAG.md)

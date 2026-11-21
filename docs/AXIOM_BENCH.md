@@ -6,6 +6,8 @@ AXIOM-Bench 从两条证据链分别评估任务达成和 Harness 正确性。�
 
 统一入口支持 Tiny 与 `RAG-CORE-01`、`RAG-LIVE-01`、`RAG-HYBRID-01` 的发现、批次与复核。混合 Case 批次的成功率使用计划数，任务与机制状态逐 Case 保留。检索复核使用外部清单 SHA-256，并重放索引与排名。旧 Tiny Case 的输入身份与判题协议沿用原入口。[Hybrid Case、命令与结果](AXIOM_HYBRID_RAG.md)
 
+科研矩阵使用 `npm run research:axiom` 显式冻结成组对照。复用原生评分器、证据存储和 Pareto。报告保留每个 Cell 的可比条件、状态和运行 ID。[两域真实矩阵与复现命令](AXIOM_ABLATION_REPRODUCIBILITY.md)
+
 ```powershell
 npm run build:offline
 npm run check

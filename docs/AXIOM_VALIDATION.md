@@ -1,5 +1,11 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-13 科研记忆与可观测性
+
+Windows 与 WSL2 Docker 真实服务验收使用 Qdrant 1.13.6、Collector Contrib 0.119.0、MLflow 3.5.1。9 条研究 Run 复用真实 Tiny CPU 训练和独立评价，10 个证据点通过 Qdrant 检索。复核了 Docker 原任务的后端状态、恢复和交付轨迹，以及同一研究运行在三项服务间的身份、摘要和训练曲线。真实 Pi 调用四次，3,615 Token，估算 USD 0.000926208。真实检索效果、失败样本、命令和证据路径见 [WP-13 科研平台](AXIOM_RESEARCH_PLATFORM.md)。
+
+Windows `npm run check` 和四项定向测试通过。WSL2 `npm run build:offline` 及 `AXIOM_ML_TEST_CONCURRENCY=1 npm run test:ml` 均退出 0，全量 **164/164**（Python 18、Node 主批 126、机制批 3、Pi 原生 17）。全部原有 160 项回归保留。原始构建及回归日志位于 `private/wp13/build-wsl.log` 和 `private/wp13/test-wsl.log`。
+
 ## WP-12 统一 Docker 与 Slurm 执行
 
 Windows TaskController 接入 WSL2 Docker 实跑。提交成功后强杀，新的原生 Pi 会话接回 `wp04-nuY83Y` 的同一容器，独立复核 512 个验证样本并交付。`wp04-7zokxT` 中取消原容器，确认退出 137 后清理。79 步预算拒绝 80 步 Docker 基线。Shell 日志、命令回执及工件清单位于 `private/wp12`。离线专项覆盖 8 项，真实 Docker 专项 2 项。真实 Slurm GPU 没有授权环境，标记 `pending_external_validation`。[执行契约、命令与实测值](AXIOM_UNIFIED_EXECUTION.md)

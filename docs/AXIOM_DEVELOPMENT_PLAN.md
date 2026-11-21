@@ -75,6 +75,7 @@ WP-09.2 使用冻结候选轮换验证开发和独立留出集，宿主以同一
 | 消融与论文复现 | WP-11.1 固定计划、同种子重复、控制变量匹配与原生任务账本绑定。按 Run / Evaluate / Train 表达复现深度。 | SciFact 真检索重放，Tiny 固定种子重训和独立验证。各组差值、范围、失败样本和 Pareto 前沿可回溯到命令与产物摘要。[实际记录](AXIOM_ABLATION_REPRODUCIBILITY.md) |
 | 多种子与实验接入 | WP-11.2 按原生启动证据对账，逐种子隔离预算和 Run ID，反馈修订单独审批。 | Tiny 三种子九次执行，SciFact 结构化修订待审批，量化 DETR 记录只读导入。[实际记录](AXIOM_RESEARCH_VALIDATION.md) |
 | Docker 与 Slurm | WP-12 将外部操作身份绑定到原生账本。任务恢复按原容器或 Job ID 主动对账，身份不明时冻结预留。 | 实际 Docker 强杀后由新 Pi 会话恢复、独立评分和交付，另有取消与预算拒绝。Slurm 命令和故障注入通过，真实 GPU 作业等待获授权集群。[统一执行](AXIOM_UNIFIED_EXECUTION.md) |
+| 科研记忆与可观测性 | WP-13 复用真实 BGE 和 Pi Context，外部服务以可核验事实建立索引、观测和实验投影。 | Qdrant 10 个可信点，MLflow 9 个实验 Run，真实 Collector 接收 Bench 与 Docker 归档事件。三端关联由实际回读核验。[科研平台](AXIOM_RESEARCH_PLATFORM.md) |
 
 ### 6. P3 · 管理界面
 
@@ -91,7 +92,7 @@ WP-09.2 使用冻结候选轮换验证开发和独立留出集，宿主以同一
 | 安全执行与工具治理 | 第 3、4 阶段 | TaskSpec 审批及工具决策记录、Docker 限制与评估隔离测试、外环策略越权拒绝用例。 |
 | Agent Evals 与可观测性 | 第 2、3、4 阶段 | AXIOM-Bench 评分卡、失败归因证据、相互可定位的 OpenTelemetry 轨迹与 Run Manifest，以及独立复验结果。 |
 
-**技术栈核对。** TypeScript、Node.js、Pi Agent SDK 对应运行入口与扩展，Python 和 PyTorch 对应现有训练与独立评估。Pi Durable、SQLite 对应第 1 阶段，Docker、OpenTelemetry、MLflow 对应第 3 阶段，Slurm、Qdrant 对应第 5 阶段。每项新增技术须有可运行的集成和验收记录后，才计入已完成技术栈。
+**技术栈核对。** TypeScript、Node.js、Pi Agent SDK 对应运行入口与扩展，Python 和 PyTorch 对应训练与独立评估。Pi Durable 和 SQLite 保存权威状态，Docker 已完成真实执行恢复。WP-13 验证 Qdrant、OpenTelemetry 和 MLflow 的本机集成。Slurm 的真实 GPU 仍等待获授权环境。
 
 ## 发布与验收规则
 

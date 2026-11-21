@@ -15,6 +15,9 @@ import { buildContext, candidateStructure, ledgerCompaction, type Snapshot } fro
 import { type Experience, loadExperience } from "../context/experience.ts";
 import { openTaskPolicy } from "../context/policy-loader.ts";
 import { configuredTinyDomain } from "../execution/tiny.ts";
+import { configuredMemory } from "../research/platform/memory.ts";
+import { bestEffortOtlp, type Signal } from "../research/platform/otlp.ts";
+import { identities } from "../research/platform/run.ts";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 const empty = Type.Object({}, { additionalProperties: false });
@@ -50,7 +53,14 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
   let allowed = names;
   let resumed = false;
   let experience: Experience[] = [];
-  let experienceStatus: "unconfigured" | "revalidated" | "unavailable" = "unconfigured";
+  let experienceStatus: "unconfigured" | "revalidated" | "semantic" | "unavailable" = "unconfigured";
+  let observations: Signal[] = [];
+  let sessionStart = 0;
+  // 原生 Pi 事件只记录枚举和时间，不复制消息、工具参数或凭据。
+  const observe = (name: Signal["name"], status?: string): void => {
+    if (!host.comparison && process.env.AXIOM_OTLP_ENDPOINT && observations.length < 2000)
+      observations.push({ key: `live/${sessionStart}/${observations.length}`, name, timestamp: Date.now(), status });
+  };
   const window = async (controller: TaskSession, snapshot = controller.snapshot()): Promise<Awaited<ReturnType<typeof buildContext>> | undefined> => {
     // 恢复后始终从已持锁的控制器重建，不读取旧会话文本。
     return controller.contextState ? buildContext(controller.root, snapshot, controller.contextState(),
@@ -66,6 +76,19 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
     try {
       await stopping;
       await controller.markUsageUnknown();
+      if (observations.length) {
+        const snapshot = controller.snapshot();
+        const best = snapshot.best;
+        const identity = { taskId: snapshot.task_id, ...identities(snapshot.task_id, best?.id ?? "session", best?.fingerprint ?? "none") };
+        // 状态仍由 Durable 提交，导出只读取已提交事实。
+        for (const op of controller.contextState?.().operations ?? []) {
+          const external = op.external;
+          observations.push({ key:`live/${sessionStart}/operation/${op.id}`, name: external ? "backend" : "operation", timestamp:Date.now(), operation:op.id, status:external?.status ?? op.status });
+        }
+        if (best) observe("evaluation", "completed");
+        if (snapshot.delivery) observe("delivery", "completed");
+        await bestEffortOtlp(controller.root, identity, observations);
+      }
     } finally {
       pi.setActiveTools(prior);
       active = false;
@@ -124,6 +147,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       // 准入仍采用原估算公式，包含实际发送的完整消息和工具定义。
       const estimate = Buffer.byteLength(JSON.stringify(messages), "utf8") + 8192 + 2048;
       await task.reserveRequest(estimate);
+      observe("model_request", "pending");
       // RPC 用宿主回执识别请求，预算拒绝生成的合成中止消息不计作真实调用。
       if (host.comparison) ctx.ui.notify("Benchmark model admission committed", "info");
       if (host.comparison && packet) ctx.ui.notify(`Benchmark context ${JSON.stringify({
@@ -144,6 +168,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
     if (!active || !task || event.message.role !== "assistant" || !task.budget.pendingUsage) return;
     const message = event.message;
     await task.recordUsage({ provider: message.provider, model: message.model, stop_reason: message.stopReason, usage: message.usage });
+    observe("model_request", message.stopReason === "error" ? "failed" : "completed");
   });
   pi.on("agent_settled", async event => {
     if (!active || !task) return;
@@ -159,6 +184,10 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       resumed = recovered;
       policy = controller.contextState?.().policy ?? approvedPolicy(configuredContext);
       useContext = policy.enhanced;
+      sessionStart = Date.now();
+      observations = [];
+      observe("session", "started");
+      if (recovered) observe("recovery", "completed");
       allowed = useContext ? [...names, "axiom_task_artifact"] : names;
       if (controller.stopped) {
         await controller.closeLedger();
@@ -172,6 +201,15 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
         // 经验路径由操作者设定，不接受工具参数指定归档。
         try { experience = await loadExperience(process.env.AXIOM_CONTEXT_EXPERIENCE); experienceStatus = experience.length ? "revalidated" : "unavailable"; }
         catch { experience = []; experienceStatus = "unavailable"; }
+      }
+      if (useContext && !host.comparison) {
+        // 向量服务失败时原可信经验仍在工作窗口中。
+        const semantic = await configuredMemory(repo);
+        if (semantic?.length) {
+          experience = [...new Map([...semantic, ...experience].map((row) => [row.evidence_id, row])).values()];
+          experienceStatus = "semantic";
+          observe("memory", "revalidated");
+        } else if (semantic && !experience.length) experienceStatus = "unavailable";
       }
       if (!registered) {
         for (const tool of tools) {
@@ -190,7 +228,9 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
           parameters: comparisonCandidate ? Type.Pick(tools[2].parameters, ["content", "rationale", "parameters"]) : tool.parameters,
           async execute(_id, params, signal): Promise<AgentToolResult<object>> {
             if (!active || !task) throw new Error("Start /axiom-task first");
+            observe("tool_call", "started");
             const result = await task.invoke(tool.name, params as Record<string, unknown>, signal);
+            observe("tool_call", result.failure_category ? "failed" : "completed");
             // 仅在工作已提交、模型尚未收到结果时开放宿主的中断同步点。
             await host.afterTool?.(tool.name, result, () => ctx.ui.notify("Benchmark barrier: baseline committed", "info"));
             if (useContext) {

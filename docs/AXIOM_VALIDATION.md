@@ -1,5 +1,17 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-10.1 科研检索优化
+
+真实 Pi 使用 DeepSeek Flash 两轮提出 SciFact BM25 参数，第一轮提交后强杀 Pi 并从原 Task ID 恢复。参数收益复验的开发集 nDCG@10 从 0.516873 到 0.519698，留出从 0.507739 到 0.508209，留出 Recall@10 从 0.582500 到 0.571389。最终代码复验中两轮候选低于基线，按规则交付基线，并产出 33 条 Trace 事件。最终真实 Case 和确定性机制 Case 的任务轴、机制轴均为 100。三次真实运行累计 18 请求、36,887 Token，Pi 估计 USD 0.006944076。每次完成运行仅记录三个不同成功检索操作，训练步数为零。[固定资产、完整指标、费用与证据](AXIOM_RAG_EXPERIMENT.md)
+
+原 Monitor 在结果未完成或证据不足时输出 `inconclusive`。仅确认回归触发策略回滚。原策略 A/B 的待定结论继续有效。
+
+Windows 与 WSL2 的 `npm run build:offline` 通过，Windows 的 `npm run check` 通过。WSL2 设置 `AXIOM_ML_TEST_CONCURRENCY=1` 后，`npm run test:ml` 以退出码 0 完成，共 **135/135**。Python 18、Node 主批 97、Node 机制批 3、原生 Pi 17。原生 Pi 两个测试文件独立复跑仍为 17/17。旧 WP-09.2 的 `T3-CTX-02` 归档按原 `--verify` 入口复算通过。
+
+Windows 同样限制跨文件并发为 1，`npm run test:ml` 全量为 **132/135**。Python 18/18、Node 主批 94/97、机制批 3/3、原生 Pi 17/17。主批的既有 `MF-062-03` 和 `MF-062-05` 达到原用例时限，`MF-062-04` 因底层操作中止退出。原始记录为 `private/wp101-test-windows.log`。
+
+Windows 单独执行 `node --test --test-name-pattern 'MF-062-0[345]' tests/axiom/multi-fidelity.test.mjs` 后，三项均按原断言与原限时通过，耗时 439.76 秒。复跑记录为 `private/wp101-windows-mf-recheck.log`，首次全量结果保留。
+
 ## WP-09.2 策略晋升与安全回滚
 
 开发和独立留出各计划并执行 6 次，12 个真实 Run 的双轴与恢复均通过。A 因开发输入和费用上升保持待定，B 因留出输入降幅 1.7% 未达到 5% 保持待定。B 的 `--apply` 被拒绝，未创建目标注册表。负例修订将恢复回执中的 AST 原因从缺失恢复为可用。隔离 SQLite 夹具已验证发布、新旧任务强制退出和恢复、真实证据回放触发的回滚及持久审计。共 90 次真实模型请求、284,745 Token，Pi 估算 USD `0.085944504`。[实验和发布证据](AXIOM_POLICY_RELEASE.md)

@@ -2,7 +2,7 @@
 
 > 以已固定的 Pi 1.5.0 源码为主体；不主动同步上游。新架构优先复用已有 Pi 机制，不重复造 TUI、Session 和基础 Agent Loop。
 
-AXIOM 是面向自主科研的自进化 Agent Harness。机器学习是首个场景，当前实现以可信 Tiny CPU Optimize 为主。目标是让同一实验控制层管理模型优化、消融、论文复现、RAG 策略优化和 Harness 自身的改进。完整目标见 [简历项目稿](AXIOM_RESUME.md)，实际能力以 [验收记录](AXIOM_VALIDATION.md) 为准。
+AXIOM 是面向自主科研的自进化 Agent Harness。当前实验控制层承载可信 Tiny CPU 模型优化与 SciFact BM25 检索优化。消融、论文复现与远程作业按独立任务验收。完整目标见 [简历项目稿](AXIOM_RESUME.md)，实际能力以 [验收记录](AXIOM_VALIDATION.md) 为准。
 
 阶段交付、依赖和验收条件见 [完整开发计划](AXIOM_DEVELOPMENT_PLAN.md)。
 
@@ -27,6 +27,7 @@ AXIOM 是面向自主科研的自进化 Agent Harness。机器学习是首个场
 | WP-08.2 | 策略白名单与 Durable 身份绑定、Benchmark 本地观测导出、原生 Compaction 恢复。独立固定训练入口已在 Windows WSL2 Docker 完成真实验收。[策略治理](AXIOM_POLICY_GOVERNANCE.md) · [隔离与观测](AXIOM_SANDBOX_OBSERVABILITY.md) | 审阅基线 |
 | WP-09.1 | 复核开发失败证据，原生 Pi RPC 生成两轮策略候选，固定开发 Case 独立评测并记录筛选结论。[策略进化](AXIOM_SELF_EVOLUTION.md) | 已通过独立静态审阅 |
 | WP-09.2 | 冻结候选、独立留出、复核发布、SQLite 策略指针及受控回滚。[发布与回滚](AXIOM_POLICY_RELEASE.md) | 等待独立审阅 |
+| WP-10.1 | SciFact BM25 接入同一任务内核，真实 Pi 两轮候选跨进程恢复，宿主独立留出复核。Monitor 三态治理。[科研检索验收](AXIOM_RAG_EXPERIMENT.md) | 等待独立审阅 |
 | 后续 | 规划中 | 第二类 AI 任务、跨任务评测、Ablate、Reproduce 和远程 GPU Runner |
 
 ## 两个优化循环

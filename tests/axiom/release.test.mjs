@@ -12,7 +12,7 @@ import { digest, json } from "../../axiom/bench/io.ts";
 import { openTaskPolicy } from "../../axiom/context/policy-loader.ts";
 import { intake } from "../../axiom/evolution/evidence.ts";
 import { openPlan, order } from "../../axiom/release/evaluation.ts";
-import { approval, gateDecision, regressions } from "../../axiom/release/gate.ts";
+import { approval, gateDecision, monitorHealth, regressions } from "../../axiom/release/gate.ts";
 import { PolicyRegistry } from "../../axiom/release/registry.ts";
 import { approvedPolicy, bindPolicy } from "../../packages/coding-agent/src/axiom/execution/harness-policy.ts";
 
@@ -82,6 +82,18 @@ test("REL-092-02 gate rejects independent regression and incomplete evidence bef
   const cost = fixture();
   cost.development.find(trial => trial.arm === arms[1].id).result.usage.estimated_cost_usd = 1;
   assert.ok(gateDecision(plan, cost, arms[1].id).reasons.includes("development:cost_increased"));
+});
+
+test("REL-101-01 monitor distinguishes completed health, verified regression, and incomplete evidence", () => {
+  const [trial] = trials("development");
+  // 即使中断归档带有失败分数，也不能据此将故障归因到策略。
+  assert.equal(monitorHealth(trial).status, "healthy");
+  const failure = { ...trial.result, task_success: { status: "fail" } };
+  assert.deepEqual(monitorHealth({ ...trial, result: failure }), { status: "regressed", reasons: ["task_success"] });
+  for (const status of ["timeout", "failed", "interrupted"])
+    assert.deepEqual(monitorHealth({ ...trial, result: { ...failure, status } }), { status: "inconclusive", reasons: [status] });
+  assert.deepEqual(monitorHealth({ ...trial, result: { ...trial.result, context_comparison: undefined } }),
+    { status: "inconclusive", reasons: ["missing_or_unqualified_evidence"] });
 });
 
 test("REL-092-03 invalid publish and interrupted SQLite transaction leave active pointer and audit unchanged", async t => {

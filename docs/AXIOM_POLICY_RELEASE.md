@@ -32,6 +32,8 @@ node --conditions=source --experimental-strip-types axiom/release/cli.ts gate --
 
 `rollback --registry <sqlite> --expected <active-sha> --reason <说明> --apply` 为人工回滚。`monitor --registry <sqlite> --evidence <case-run-directory> --sha <manifest-sha> --apply` 为受控自动判定。后者重算可信 Case 和实际策略绑定，核实回归后原子回滚。默认预演。启动时检测到活动策略内容损坏也会触发 SQLite 内自动回滚。整个数据库不可读时，单个新任务可回退内置批准版并报错提示，该情况没有可写数据库供追加审计。
 
+WP-10.1 后 Monitor 同时输出 `status` 与 `reasons`。`healthy` 要求独立评分和运行证据完整，`regressed` 表示已证实的退化，`inconclusive` 表示超时、中断、环境失败或证据不足。自动判定仅在 `regressed` 且明确指定 `--apply` 时触发回滚。归档校验失败时仍返回非零退出码。
+
 SQLite 事务同时保存历史策略、Active/Previous 指针与事件。比较并切换使用预期 Active 摘要，旧部署的证据不能回滚已经替换的指针。失败或进程中断会回退未提交事务。当前由操作者或受信调度器调用监控 CLI，未安装常驻监控或生产发布服务。
 
 ## 重复对照结果

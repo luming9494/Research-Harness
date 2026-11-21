@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { file, sha256 } from "../bench/io.ts";
 import { checkTrial, developmentCase, holdoutCase, openPlan, readStage } from "./evaluation.ts";
-import { approval, gateDecision, regressions, summarize } from "./gate.ts";
+import { approval, gateDecision, monitorHealth, summarize } from "./gate.ts";
 import { PolicyRegistry } from "./registry.ts";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
@@ -94,32 +94,40 @@ async function main(): Promise<void> {
 		}
 		if (!values.evidence || !values.sha) throw new Error("Monitor requires --evidence with its manifest --sha");
 		const source = resolve(values.evidence);
+		const manifestSha = values.sha;
 		const policy = values.apply ? registry.active().policy : registry.inspect();
-		const trial = await checkTrial(
-			repo,
-			source,
-			{
-				arm: "active",
-				repetition: 1,
-				path: source,
-				manifest_sha256: values.sha,
-				result_sha256: sha256(await file(source, "result.json")),
-			},
-			policy,
-		);
-		if (![developmentCase, holdoutCase].includes(trial.result.case_id))
+		// 保留证据校验的非零退出码，同时向监测系统明确报告结论不确定。
+		const trial = await (async (): ReturnType<typeof checkTrial> =>
+			checkTrial(
+				repo,
+				source,
+				{
+					arm: "active",
+					repetition: 1,
+					path: source,
+					manifest_sha256: manifestSha,
+					result_sha256: sha256(await file(source, "result.json")),
+				},
+				policy,
+			))().catch((error: unknown) => {
+			console.log(JSON.stringify({ status: "inconclusive", reasons: ["unverified_evidence"] }));
+			throw error;
+		});
+		if (![developmentCase, holdoutCase].includes(trial.result.case_id)) {
+			console.log(JSON.stringify({ status: "inconclusive", reasons: ["unsupported_runtime_case"] }));
 			throw new Error("Unsupported runtime regression case");
-		const reasons = regressions(trial);
-		if (reasons.length && values.apply) {
+		}
+		const health = monitorHealth(trial);
+		if (health.status === "regressed" && values.apply) {
 			const fallback = registry.rollback(policy.sha256, {
 				type: "benchmark",
 				reference: values.sha,
-				reason: reasons.join(","),
+				reason: health.reasons.join(","),
 			});
 			console.log(
-				JSON.stringify({ outcome: "rolled_back", triggering_run: trial.result.run_id, reasons, fallback }),
+				JSON.stringify({ outcome: "rolled_back", triggering_run: trial.result.run_id, ...health, fallback }),
 			);
-		} else console.log(JSON.stringify({ dry_run: !values.apply, triggering_run: trial.result.run_id, reasons }));
+		} else console.log(JSON.stringify({ dry_run: !values.apply, triggering_run: trial.result.run_id, ...health }));
 	} finally {
 		registry.close();
 	}

@@ -54,6 +54,21 @@ export function gateDecision(plan: Plan, arms: Record<Stage, readonly Trial[]>, 
 }
 
 // 资格依赖独立评分、确定可复验的恢复和真实用量，不以最低消耗替代任务完成。
+/** 监测只在独立证据验证后判断健康，执行中断本身不触发回滚。 */
+export function monitorHealth(trial: Trial): {
+	status: "healthy" | "regressed" | "inconclusive";
+	reasons: string[];
+} {
+	const reasons = regressions(trial);
+	if (reasons.length) return { status: "regressed", reasons };
+	if (qualified(trial)) return { status: "healthy", reasons: [] };
+	return {
+		status: "inconclusive",
+		reasons: [trial.result.status === "completed" ? "missing_or_unqualified_evidence" : trial.result.status],
+	};
+}
+
+// 发布和监测共用证据完整性要求。
 function qualified(trial: Trial): boolean {
 	const { result, recovered_reason } = trial;
 	return (

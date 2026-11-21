@@ -2,35 +2,33 @@
 
 **AXIOM 是基于固定版本 Pi 1.5.0 开发、面向自主科研的自进化 Agent Harness。** 机器学习是首个落地场景，长期覆盖模型优化、论文复现、消融实验与 RAG 检索策略优化。
 
-> **当前状态：WP-04 的可信 Tiny CPU 优化已通过两阶段真实 LLM 主流程验收。** 第二阶段通过原生 Pi RPC 完成两轮自主候选，独立 validation accuracy 从 0.5 提升至 1.0，并交付可独立重载的最佳模型。候选较差、平分或失败后的回退覆盖来自离线测试。终端键盘与视觉交互仍待验收。详见 [验收记录](docs/AXIOM_VALIDATION.md)。
-
-> **WP-05.2 支持可信 Tiny CPU 任务跨进程恢复。** 原生 Pi 扩展使用 Pi Durable + SQLite 保存实验账本。真实 CPU 验收中，首轮后强制结束进程，再用原任务 ID 恢复，仅训练剩余的唯一候选。状态不明的操作保留原预留并暂停。[WP-05 验证](docs/AXIOM_WP05_RUNTIME.md)
+**当前可用场景包括 Tiny CPU 模型优化、SciFact 检索优化、科研消融和分级复验。** 项目可从论文原文定位追溯到冻结计划、原生账本、独立指标和最终结论。通过 [最终工程与 Demo](docs/AXIOM_FINAL_ENGINEERING.md)、[验收记录](docs/AXIOM_VALIDATION.md) 和 [简历证据映射](docs/AXIOM_RESUME_EVIDENCE.md) 核对实现和适用范围。
 
 ## 为什么重新基于 Pi 源码开发？
 
 旧 AXIOM 通过 Pi SDK 自行实现了一层 CLI、Session 工厂、日志订阅和供应商回退。这与 Pi 已经存在的 TUI、Agent Loop、Extensions、模型目录和上下文机制部分重复。
 
-**Pi 提供 Agent 底座，AXIOM 负责 AI 任务的执行与验证。** 当前扩展用 ML TaskSpec、候选审查、训练、独立评估和最佳模型交付跑通这条链路。后续用训练之外的任务检验预算、执行、证据与交付机制能否复用。
+**Pi 提供 Agent 底座，AXIOM 负责科研任务的执行与验证。** Tiny CPU 和 SciFact 共享预算、去重、执行、取证与交付。科研工作区把原生运行链接到计划和结论。
 
 - **Pi 提供**模型与凭据配置、Agent Loop、工具调度、会话、通用上下文管理和 TUI。Pi Durable 还提供持久任务、检查点及重启调度。
-- **AXIOM 负责**科研 TaskSpec、领域预算、候选实验、独立评分和证据交付。外部作业对账及策略评测与发布属于后续目标。
+- **AXIOM 负责**科研 TaskSpec、领域预算、候选实验、独立评分、外部作业对账和策略治理。
 - **版本策略**：以当前下载的 Pi 1.5.0 源码为固定底座，**不自动追踪上游更新**。AXIOM 与 Pi 原作者没有从属或官方合作关系。
 
 ## 双闭环与应用场景
 
-- **实验内环**在同一评估协议和预算下提出假设、筛选候选、执行实验并依据结果迭代。WP-04 已在可信 Tiny CPU 上验收多轮流程，多保真剪枝与 Pareto 多目标搜索是后续目标。
-- **策略外环**从历史轨迹发现可重复失败，提出受限策略变更，经对照和独立留出评测后发布或拒绝。已发布版本可回滚。首版计划开放 Prompt、白名单 Skill、工具输出和上下文策略配置。
+- **实验内环**在同一评估协议和预算下提出假设、筛选候选、执行实验并依据结果迭代。Tiny CPU 已验收多保真、Pareto 和多种子统计，SciFact 已验收混合检索与独立重放。
+- **策略外环**从历史轨迹发现可重复的失败，提出受限呈现策略，经开发对照、独立留出和固定门槛决定晋升、拒绝或待定。注册表通过事务保存发布与回滚事件。
 
 | 目标模式 | 典型输入 | 最终交付 | 状态 |
 | --- | --- | --- | --- |
 | **Optimize** 模型改进与课程打榜 | 基线代码、规则、训练数据、指标、预算 | 合法模型代码、权重、独立验证、实验总结 | 可信 Tiny Task 单候选及多轮预算内核已迁入 |
-| **Reproduce** 论文复现 | 论文、GitHub 仓库、数据及复现协议 | Run / Evaluate / Train 复现级别、指标差距 | 规划中 |
-| **Ablate** 消融实验 | 基线、模块组合、已有实验和预算 | 消融组合、真实结果、配置和报告 | 规划中 |
-| **RAG 检索优化** | 固定语料、查询集、相关性标注、检索基线 | 检索配置、独立指标与查询级对照 | 规划中，复用实验内环 |
+| **Reproduce** 固定协议复验 | 论文资料、工件与冻结计划 | Run / Evaluate / Train 级别和证据图 | Tiny 训练复验与 SciFact 排名重放已验证 |
+| **Ablate** 消融实验 | 基线、控制条件与预算 | 配对差值、多种子统计和报告 | Tiny CPU、SciFact 已实跑 |
+| **RAG 检索优化** | 固定语料、查询集、相关性标注、检索基线 | 检索配置、独立指标与查询级对照 | SciFact BM25 / Dense / RRF 已实跑 |
 
 目标交互是：**自然语言任务 → 检查规则 → 规划候选 → 改代码 → 真训练/评估 → 根据客观结果迭代 → 按预算停止 → 交付模型与报告**。
 
-当前支持 **WP-01～04 的可信 Tiny CPU 流程**，不声称可以接管任意第三方训练仓库。WP-04 已从本机旧源码抽取领域实现，未迁入旧 Session 工厂、readline、模型请求或供应商回退包装。
+当前运行范围为可信 Tiny 和 SciFact 实验入口。正常 Pi 会话可读取经过范围校验的 Qdrant 历史经验，训练和独立评分仍由宿主执行。
 
 ## 新源码在哪里？
 
@@ -89,7 +87,7 @@ Research-Harness/
 git clone https://github.com/luming9494/Research-Harness.git
 cd Research-Harness
 npm ci --ignore-scripts
-npm run build
+npm run build:offline
 
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r examples\tiny-ml-eval\requirements-cpu.txt
@@ -173,13 +171,13 @@ CLI 参数可以透传，例如 `npm run axiom -- --offline --version`、`npm ru
 - 不能通过最终测试集反复调参；程序独立验证 validation 指标。
 - API Key、未发表论文、真实实验结果和模型权重不得上传到公开仓库。
 
-## 下一步开发重点
+## Docker、Benchmark 与验收边界
 
-1. **P0**：以 WP-05.2 的任务恢复为基线建设 AXIOM-Bench，再对照多保真搜索与现有完整训练策略。
-2. **P1**：完成四层上下文、工具治理与实验证据链，再验证一次受控策略提案、评测、发布与回滚。
-3. **P2–P3**：接入 RAG、消融、分级复现和 Slurm GPU 作业。账本与报告稳定后增加管理界面。
+固定摘要镜像和 Docker 启动参数见 [统一执行](docs/AXIOM_UNIFIED_EXECUTION.md)。本机观测服务用 [科研平台](docs/AXIOM_RESEARCH_PLATFORM.md) 的固定版本启动。
 
-审阅时先看[完整开发计划](docs/AXIOM_DEVELOPMENT_PLAN.md)与[开发路线](docs/AXIOM_ROADMAP.md)，再对照[产品需求](docs/PRODUCT_REQUIREMENTS.md)、[评测设计](docs/EVALUATION.md)、[简历目标稿](docs/AXIOM_RESUME.md)和上述两份验收记录。Pi 复用与领域模块迁移见[迁移说明](docs/AXIOM_MIGRATION.md)。
+使用 `npm run bench:axiom -- --verify CASE_DIR` 复核已有记录，使用 `npm run suite:axiom -- ...` 核对跨领域证据。模型任务达成和 Harness 正确性保持独立评分。完整命令和真实对照见 [最终工程与 Demo](docs/AXIOM_FINAL_ENGINEERING.md)。
+
+Slurm 已有离线对账、防重与取消验收，真实 GPU 仍需获授权集群。正式 Dropout/MNIST 留待独立复现挑战。参见 [开发路线](docs/AXIOM_ROADMAP.md)、[评测设计](docs/EVALUATION.md) 与 [简历目标稿](docs/AXIOM_RESUME.md)。
 
 ## Pi 来源和许可
 

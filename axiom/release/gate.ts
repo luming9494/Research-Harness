@@ -1,4 +1,5 @@
 // 发布门槛 v1 使用固定双轴规则、两次重复和独立留出，模型无权影响结论。
+import { passStatistics } from "../bench/comparison.ts";
 import type { Decision } from "../evolution/policy.ts";
 import type { Plan, Stage, Trial } from "./evaluation.ts";
 import type { ReleaseApproval } from "./registry.ts";
@@ -152,6 +153,15 @@ export function summarize(trials: readonly Trial[], plan: Plan): object[] {
 			rate: passed / plan.repetitions,
 			harness_passed: selected.filter((trial) => trial.result.harness_correctness.status === "pass").length,
 			recovered: selected.filter((trial) => trial.result.context_comparison?.recovered).length,
+			// 只在完整组计算重复统计。未知/失败试验保留在分母。
+			reliability:
+				selected.length === plan.repetitions
+					? [1, plan.repetitions].map((k) => passStatistics(plan.repetitions, passed, k))
+					: null,
+			repaired: selected.filter(({ result }) => result.context_comparison?.repair === "repaired").length,
+			error_visible: selected.filter(({ result }) => result.context_comparison?.error_visible).length,
+			wall_seconds: stats(selected.map(({ result }) => result.wall_seconds)),
+			duplicate_launches: stats(selected.map(({ result }) => result.execution?.duplicate_launches)),
 			input: stats(selected.map(({ result }) => result.context_comparison?.input_tokens)),
 			tokens: stats(selected.map(({ result }) => result.usage.tokens)),
 			calls: stats(selected.map(({ result }) => result.usage.requests)),

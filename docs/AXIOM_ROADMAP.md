@@ -34,6 +34,7 @@ AXIOM 是面向自主科研的自进化 Agent Harness。当前实验控制层承
 | WP-12 | 正常任务接入 Docker 与 Slurm，保留单一 Durable 账本，按外部身份恢复和结算。[统一执行](AXIOM_UNIFIED_EXECUTION.md) | Docker 实跑和 Slurm 离线验收通过，真实 GPU 待授权环境 |
 | WP-13 | 从可信科研归档投影 Qdrant、OTLP 与 MLflow，集成原生 Pi 会话和分层上下文。[科研平台](AXIOM_RESEARCH_PLATFORM.md) | 三项本机服务与真实 Pi 检索已验证，等待独立审阅 |
 | WP-14 | 项目级证据图、论文定位、冻结计划与复现报告。[科研工作区](AXIOM_RESEARCH_WORKSPACE.md) | 已验收 Tiny 与 QC-DETR 导入，并验证正常 Pi 经验注入 |
+| WP-15 | 真实策略重复对照、跨领域复核、上下文消融与严格科研假设契约。[最终工程](AXIOM_FINAL_ENGINEERING.md) | 以独立审阅后的冻结版本作为正式论文复现基线 |
 | 后续 | 规划中 | 第二类 AI 任务、跨任务评测、Ablate、Reproduce 和远程 GPU Runner |
 
 ## 两个优化循环

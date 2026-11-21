@@ -5,6 +5,7 @@ import { verifySamples } from "../evidence.ts";
 import { loadPlan, readSamples } from "../execute.ts";
 import { identities } from "../platform/run.ts";
 import { paired, researchReport } from "../report.ts";
+import { assessDirection } from "./hypothesis.ts";
 import type { Node, Relation } from "./store.ts";
 
 export async function matrixEvidence(
@@ -116,15 +117,9 @@ export async function matrixEvidence(
 		const chosen = samples.filter(({ cell }) => cell.condition.id === hypothesis.comparison);
 		const refs = samples.filter(({ cell }) => cell.condition.id === chosen[0]?.cell.condition.reference);
 		const delta = paired(chosen, refs, hypothesis.metric);
-		const outcome =
-			delta.pairs !== plan.repeats || delta.absolute === null
-				? "uncertain"
-				: (hypothesis.direction === "increase" ? delta.absolute > 0 : delta.absolute < 0)
-					? "supported"
-					: delta.absolute === 0
-						? "uncertain"
-						: "contradicted";
-		const finding = `finding-${sha256(JSON.stringify([id, delta, outcome]))}`;
+		const outcome = assessDirection(hypothesis.direction, delta.absolute, delta.pairs === plan.repeats);
+		// 版本加入身份，旧归档原地保留；新结论记录可独立审计的证据层级。
+		const finding = `finding-${sha256(JSON.stringify([2, id, delta, outcome]))}`;
 		nodes.push(
 			{ id, kind: "hypothesis", data: hypothesis },
 			{
@@ -136,7 +131,10 @@ export async function matrixEvidence(
 					metric: hypothesis.metric,
 					scope: plan.controlled,
 					independent: delta.pairs > 0,
-					host_confirmed: true,
+					evidence_version: 2,
+					computed: delta.pairs > 0,
+					model_proposed_hypothesis: plan.proposal_sha256 ? true : null,
+					operator_confirmed: false,
 					model_commentary: null,
 					limitations: "Descriptive paired results within the frozen matrix.",
 				},

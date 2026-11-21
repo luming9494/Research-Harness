@@ -77,6 +77,7 @@ WP-09.2 使用冻结候选轮换验证开发和独立留出集，宿主以同一
 | Docker 与 Slurm | WP-12 将外部操作身份绑定到原生账本。任务恢复按原容器或 Job ID 主动对账，身份不明时冻结预留。 | 实际 Docker 强杀后由新 Pi 会话恢复、独立评分和交付，另有取消与预算拒绝。Slurm 命令和故障注入通过，真实 GPU 作业等待获授权集群。[统一执行](AXIOM_UNIFIED_EXECUTION.md) |
 | 科研记忆与可观测性 | WP-13 复用真实 BGE 和 Pi Context，外部服务以可核验事实建立索引、观测和实验投影。 | Qdrant 10 个可信点，MLflow 9 个实验 Run，真实 Collector 接收 Bench 与 Docker 归档事件。三端关联由实际回读核验。[科研平台](AXIOM_RESEARCH_PLATFORM.md) |
 | 科研工作区与论文证据图 | WP-14 将资料定位、计划审批、原生独立评价和结论关联到研究项目。 | 九个 Tiny 多种子运行、QC-DETR 未复验导入、真实 Pi 规划及证据引用、矩阵中断后恢复。[科研工作区](AXIOM_RESEARCH_WORKSPACE.md) |
+| 最终工程整合 | WP-15 将跨领域复验、策略对照、上下文消融与科研报告统一为操作者入口。 | 独立保留真实与离线证据，严守原策略门槛。[最终工程](AXIOM_FINAL_ENGINEERING.md) |
 
 ### 6. P3 · 管理界面
 

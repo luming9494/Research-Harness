@@ -101,13 +101,20 @@ async function register(
 	const usage: ProposalReply["usage"][] = [];
 	let reason: string | null = null;
 	for (let attempt = 1; attempt <= 2 && !signal.aborted; attempt++) {
+		// 先登记调用，崩溃留下可计数的未知用量；保留原提案供本地复核。
+		const id = randomUUID();
+		await json(root, `candidates/${id}/intent.json`, {
+			round,
+			attempt,
+			model: proposalModel,
+			parent_sha256: parent.sha256,
+		});
 		const reply = await requestProposal(
 			repo,
 			proposalPrompt(evidence, parent, reason ? { feedback, previous_proposal_rejected: reason } : feedback),
 			signal,
 		);
 		usage.push(reply.usage);
-		const id = randomUUID();
 		const createdAt = new Date().toISOString();
 		const envelope = {
 			schema_version: 1,
@@ -120,6 +127,7 @@ async function register(
 			model: proposalModel,
 			usage: reply.usage,
 			response_sha256: reply.text ? sha256(reply.text) : null,
+			response: reply.text,
 		};
 		let candidate: Candidate;
 		try {

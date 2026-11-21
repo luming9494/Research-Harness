@@ -68,12 +68,25 @@ export async function identity(
 						// 旧协议以已审阅执行器身份核对，仅接受本阶段已知的种子扩展或原版字节。
 						if (
 							version === 1 &&
-							asset.sha256 === "a23f397476eaa405ed7e52914ed0f2601bd0f7e5f1c7fd36d6a120e94711a1a9"
+							[
+								"a23f397476eaa405ed7e52914ed0f2601bd0f7e5f1c7fd36d6a120e94711a1a9",
+								"d2df2eee8d00f76fdef935fc3304996e5840f59a652d180440c05cc5b201dce1",
+							].includes(asset.sha256)
 						)
 							return {
 								...asset,
 								sha256: "8de973a4f379e1a03b98d3467b74fd3c814b913ca36110d192fe725a3749f43d",
 								bytes: 32644,
+							};
+						// WP-12 仅开放计数器，冻结的 v2 本地矩阵继续沿用原执行身份。
+						if (
+							version === 2 &&
+							asset.sha256 === "d2df2eee8d00f76fdef935fc3304996e5840f59a652d180440c05cc5b201dce1"
+						)
+							return {
+								...asset,
+								sha256: "a23f397476eaa405ed7e52914ed0f2601bd0f7e5f1c7fd36d6a120e94711a1a9",
+								bytes: 33008,
 							};
 						return asset;
 					}),

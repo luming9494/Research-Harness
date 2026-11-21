@@ -74,7 +74,7 @@ WP-09.2 使用冻结候选轮换验证开发和独立留出集，宿主以同一
 | RAG 检索优化 | WP-10.2 在冻结 SciFact 上接入 BGE 精确向量召回、BM25 与 RRF，复用 ExperimentDomain 与 Durable。Cross-Encoder 重排另行验收。 | 开发集选优、留出独立复验，统一入口重建索引、核对排名、贡献、预算和双轴评分。[实际记录](AXIOM_HYBRID_RAG.md) |
 | 消融与论文复现 | WP-11.1 固定计划、同种子重复、控制变量匹配与原生任务账本绑定。按 Run / Evaluate / Train 表达复现深度。 | SciFact 真检索重放，Tiny 固定种子重训和独立验证。各组差值、范围、失败样本和 Pareto 前沿可回溯到命令与产物摘要。[实际记录](AXIOM_ABLATION_REPRODUCIBILITY.md) |
 | 多种子与实验接入 | WP-11.2 按原生启动证据对账，逐种子隔离预算和 Run ID，反馈修订单独审批。 | Tiny 三种子九次执行，SciFact 结构化修订待审批，量化 DETR 记录只读导入。[实际记录](AXIOM_RESEARCH_VALIDATION.md) |
-| Slurm GPU | 保存本地提交意图和远程作业 ID，断连后按提交标识查询排队、运行及终态。提交状态未知时暂停重发。将预算、取消、日志复查和产物收集接到远端。 | 实际提交一个 GPU 作业，杀掉本地进程再恢复监控。对账证明只提交一次，并验证取消或正常退出及产物可核验。 |
+| Docker 与 Slurm | WP-12 将外部操作身份绑定到原生账本。任务恢复按原容器或 Job ID 主动对账，身份不明时冻结预留。 | 实际 Docker 强杀后由新 Pi 会话恢复、独立评分和交付，另有取消与预算拒绝。Slurm 命令和故障注入通过，真实 GPU 作业等待获授权集群。[统一执行](AXIOM_UNIFIED_EXECUTION.md) |
 
 ### 6. P3 · 管理界面
 

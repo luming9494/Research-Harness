@@ -1,5 +1,11 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-12 统一 Docker 与 Slurm 执行
+
+Windows TaskController 接入 WSL2 Docker 实跑。提交成功后强杀，新的原生 Pi 会话接回 `wp04-nuY83Y` 的同一容器，独立复核 512 个验证样本并交付。`wp04-7zokxT` 中取消原容器，确认退出 137 后清理。79 步预算拒绝 80 步 Docker 基线。Shell 日志、命令回执及工件清单位于 `private/wp12`。离线专项覆盖 8 项，真实 Docker 专项 2 项。真实 Slurm GPU 没有授权环境，标记 `pending_external_validation`。[执行契约、命令与实测值](AXIOM_UNIFIED_EXECUTION.md)
+
+WSL2 的 `npm run build:offline` 通过，单并发 `npm run test:ml` 退出码 0，共 **160/160**，其中 Python 18、Node 主批 122、机制批 3、Pi 原生 17。Windows `npm run check` 通过，8 项定向离线回归及 2 项真实 Docker 验收通过。Windows 复核 WP-11.1 与 WP-11.2 Tiny 原归档的 6 个和 9 个单元，计划及评分仍能核验。原始日志见 `private/wp12/build-wsl.log`、`test-wsl.log`、`slurm-tests-final.log` 和 `docker-live-verified.log`。
+
 ## WP-11.2 多种子科研验证
 
 Windows 对 Seed 42、43、44 各执行三组学习率。九次完成、九份独立复算，Python 另行重算均值、范围、样本 SD 与配对差。SciFact 深度修订从两项否定证据生成，保持待审批。QC-DETR E2 已只读导入，缺少原始工件，级别为 `imported_unverified`。[数据、费用和证据路径](AXIOM_RESEARCH_VALIDATION.md)

@@ -27,6 +27,7 @@
 		"includes": [
 			"axiom/bench/**/*.ts",
 			"axiom/context/**/*.ts",
+			"axiom/execution/**/*.ts",
 			"axiom/evolution/**/*.ts",
 			"axiom/release/**/*.ts",
 			"axiom/rag/**/*.ts",

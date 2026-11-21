@@ -160,7 +160,8 @@ export class CpuTaskExecutor implements DurableExperimentAdapter {
 	private paretoSha256?: string;
 	private trusted = new Map<string, string>();
 	private prepared = new Map<string, Candidate>();
-	private counter = 0;
+	// 外部适配器也用相同的原生操作序号，与本地静态审查共用一个账本。
+	protected counter = 0;
 	private identity = "";
 	private supervisorSha256?: string;
 	private sources: Record<string, string> = {};

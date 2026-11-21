@@ -78,6 +78,16 @@ const current = Type.Object(
 		starting_model: Type.Optional(Type.Literal("shallow_tanh")),
 		// 研究矩阵逐种子审批初始化。候选工具仍只接受学习率。
 		initialization_seed: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647 })),
+		// 首版外部执行限于可信 Tiny 全训练，审批必须固定宿主配置摘要。
+		backend: Type.Optional(
+			Type.Object(
+				{
+					type: Type.Union([Type.Literal("docker"), Type.Literal("slurm")]),
+					profile_sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+				},
+				{ additionalProperties: false },
+			),
+		),
 		max_revisions: Type.Integer({ minimum: 0, maximum: 3 }),
 	},
 	{ additionalProperties: false },
@@ -89,6 +99,7 @@ const staged = Type.Object(
 		version: Type.Literal(3),
 		starting_model: Type.Optional(Type.Never()),
 		initialization_seed: Type.Optional(Type.Never()),
+		backend: Type.Optional(Type.Never()),
 		budget: Type.Object(
 			{
 				...common.budget.properties,

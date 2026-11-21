@@ -14,6 +14,7 @@ import { artifactTail, artifactsFor } from "../context/artifacts.ts";
 import { buildContext, candidateStructure, ledgerCompaction, type Snapshot } from "../context/builder.ts";
 import { type Experience, loadExperience } from "../context/experience.ts";
 import { openTaskPolicy } from "../context/policy-loader.ts";
+import { configuredTinyDomain } from "../execution/tiny.ts";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 const empty = Type.Object({}, { additionalProperties: false });
@@ -262,7 +263,8 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       if (active || tinyActive()) { ctx.ui.notify("Stop the current AXIOM mode before starting another task.", "warning"); return; }
       if (!ctx.hasUI) throw new Error("Task requires interactive approval");
       const spec = validateTaskSpec(args.trim() ? JSON.parse(args) as unknown : { version: 1, task: "tiny-xor-v1", goal: "Improve Tiny XOR validation accuracy within approved budgets", target_accuracy: null, rules: TASK_RULES, budget: DEFAULT_BUDGET });
-      if (!await ctx.ui.confirm("AXIOM multi-round Tiny Task", `${JSON.stringify(spec, null, 2)}\nAllow local CPU experiments? Chat uses the selected Pi model and may incur fees. Token admission is estimated, not an absolute provider billing cap.`)) return;
+      // 新建时显式展示后端选择。操作者配置由创建和恢复入口在宿主解析。
+      if (!await ctx.ui.confirm("AXIOM multi-round Tiny Task", `${JSON.stringify(spec, null, 2)}\nAllow ${spec.backend?.type ?? "trusted local"} experiments? Chat uses the selected Pi model and may incur fees. Token admission is estimated, not an absolute provider billing cap.`)) return;
       const approval = { approvedAt: new Date().toISOString(), sessionId: ctx.sessionManager.getSessionId() };
       // 操作者配置只在创建新任务时读取。回退仅对新建任务生效。
       // Bench 隔离使用冻结的候选文件。生产指针只在新任务审批后读取。
@@ -272,7 +274,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       // 三组共用原始审批，生产入口默认使用 Durable 控制器。
       const controller = host.create
         ? await host.create(repo, pythonPath(), spec, () => ctx.abort(), approval)
-        : await TaskController.create(repo, pythonPath(), spec, () => ctx.abort(), { open: openExperimentLedger, approval, policy: selected.policy });
+        : await TaskController.create(repo, pythonPath(), spec, () => ctx.abort(), { open: openExperimentLedger, approval, policy: selected.policy }, configuredTinyDomain());
       await activate(controller, ctx, false);
     },
   });
@@ -283,7 +285,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       if (active || tinyActive()) { ctx.ui.notify("Stop the current AXIOM mode before resuming another task.", "warning"); return; }
       if (host.create) throw new Error("This comparison arm does not implement task recovery");
       // 原审批随账本恢复；本命令本身不会发模型请求。
-      await activate(await TaskController.resume(repo, pythonPath(), args.trim(), openExperimentLedger, () => ctx.abort()), ctx, true);
+      await activate(await TaskController.resume(repo, pythonPath(), args.trim(), openExperimentLedger, () => ctx.abort(), configuredTinyDomain()), ctx, true);
     },
   });
   pi.registerCommand("axiom-task-stop", {

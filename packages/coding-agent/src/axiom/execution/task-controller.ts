@@ -234,6 +234,9 @@ export class TaskController {
 	): Promise<TaskController> {
 		const spec = domain.validateSpec(input);
 		if (spec.task !== domain.id) throw new Error("TaskSpec does not match experiment adapter");
+		// 外部任务必须持久化并使用批准的适配器，缺少配置时拒绝回退。
+		if (spec.backend && (!durable || !domain.externalExecution))
+			throw new Error("External execution requires its approved durable adapter");
 		repo = await realpath(repo);
 		python = await realpath(python);
 		const parent = await TaskController.taskDirectory(repo);
@@ -271,6 +274,7 @@ export class TaskController {
 		open: OpenTaskLedger,
 		onStop: () => void,
 		domain: ExperimentDomain = tinyExperimentDomain,
+		externalAction: "monitor" | "cancel" = "monitor",
 	): Promise<TaskController> {
 		if (!/^wp04-[A-Za-z0-9]{6}$/.test(id)) throw new Error("Invalid AXIOM task ID");
 		repo = await realpath(repo);
@@ -282,6 +286,8 @@ export class TaskController {
 			const saved = await ledger.load();
 			if (!saved || saved.taskId !== id) throw new Error("No durable experiment ledger for this task");
 			const spec = domain.validateSpec(saved.spec);
+			if (spec.backend && !domain.externalExecution)
+				throw new Error("Restore requires the original external adapter");
 			// 无版本标记的历史账本仅允许原适配器按旧权限解释。
 			const compatible = saved.domain
 				? saved.domain.id === domain.id && saved.domain.version === domain.version
@@ -297,6 +303,8 @@ export class TaskController {
 				saved: saved.executor,
 				commandCount: saved.commands.length,
 			});
+			// 核验已结算命令前先绑定原截止时间，避免恢复重新计算它。
+			if (executor.recoverExecution) executor.approvedDeadline = saved.deadline;
 			for (const command of saved.commands) if ("recordSha256" in command) await executor.verifyCommand(command);
 			const task = new TaskController(root, spec, budget, executor, onStop);
 			if (spec.fidelity && !executor.fidelity) throw new Error("Missing durable stage adapter");
@@ -323,7 +331,8 @@ export class TaskController {
 			task.reason = saved.summary.stop_reason;
 			if (task.stopped) {
 				task.endedAt = saved.summary.ended_at ?? saved.savedAt ?? wallNow;
-				budget.freezeWall(saved.summary.budget.wall_seconds);
+				if (!(spec.backend && task.reason === "operation_unconfirmed"))
+					budget.freezeWall(saved.summary.budget.wall_seconds);
 			}
 			task.delivery = saved.summary.delivery;
 			task.pendingRun = saved.pendingRun;
@@ -357,6 +366,72 @@ export class TaskController {
 				if (op.reservation && op.fingerprint && op.status === "not_started" && !authorized.has(op.fingerprint))
 					task.attempted.delete(op.fingerprint);
 			for (const fingerprint of authorized) task.attempted.add(fingerprint);
+			// 已获提交许可的远程操作只通过原有令牌对账。恢复不进入启动准入。
+			const external = task.commands.findLast(
+				(op) =>
+					op.external && op.runId === task.pendingRun && op.status !== "not_started" && op.status !== "failed",
+			);
+			const clockRolledBack = saved.savedAt !== undefined && wallNow < saved.savedAt;
+			if (
+				external &&
+				!clockRolledBack &&
+				executor.recoverExecution &&
+				(!task.stopped ||
+					task.reason === "operation_unconfirmed" ||
+					["user_cancelled", "wall_budget_exhausted"].includes(task.reason ?? ""))
+			) {
+				// 已明确终止的任务只补做取消和结算，不能在恢复时重新开放任务。
+				const cancellationOnly =
+					externalAction === "cancel" || (task.stopped && task.reason !== "operation_unconfirmed");
+				try {
+					const recovered = await executor.recoverExecution(
+						external,
+						cancellationOnly
+							? AbortSignal.abort()
+							: AbortSignal.timeout(Math.max(1, Math.floor(budget.remainingWallMs))),
+					);
+					task.recordEvaluation(recovered);
+					if (recovered.id === "baseline") task.baseline = recovered;
+					task.best = chooseBest(task.best, recovered, executor.evaluation);
+					const row = task.rows.find(({ id }) => id === recovered.id);
+					if (row)
+						Object.assign(row, {
+							status: "evaluated",
+							validation: recovered.validation,
+							run: recovered.run,
+							best_id: task.best.id,
+							error: undefined,
+						});
+					task.pendingRun = undefined;
+					task.reason = undefined;
+					task.endedAt = undefined;
+					task.failure = undefined;
+					task.failureCategory = undefined;
+					task.event("external_reconciled", { id: external.id, run: recovered.id });
+				} catch (error) {
+					const settled = task.commands[external.id - 1];
+					if (cancellationOnly) {
+						if (settled?.status === "failed" || settled?.status === "completed") task.pendingRun = undefined;
+						if (!task.stopped || externalAction === "cancel") {
+							task.reason = undefined;
+							task.requestStop("user_cancelled", "restore");
+						}
+					} else if (
+						settled?.status === "failed" ||
+						(settled?.status === "completed" &&
+							(error instanceof BudgetStop ||
+								(error instanceof ExperimentFailure && error.category === "evidence_integrity")))
+					) {
+						task.pendingRun = undefined;
+						task.reason = undefined;
+						task.handleFailure(error, "baseline", task.cancellation.signal);
+					} else {
+						task.failure = String(error);
+						task.failureCategory = "external_unknown";
+						if (task.stopped) budget.freezeWall(saved.summary.budget.wall_seconds);
+					}
+				}
+			}
 			const pendingRow = task.rows.find((row) => row.id === task.pendingRun && row.staged);
 			// 已完成阶段以已提交的凭证为准。训练或评分完成但凭证尚未提交时保持待核对。
 			const stageUncertain =
@@ -397,7 +472,7 @@ export class TaskController {
 				task.failure = "An external operation was not confirmed; its reservation was retained";
 				task.failureCategory = "external_unknown";
 			}
-			if (!task.stopped && saved.savedAt !== undefined && wallNow < saved.savedAt) {
+			if (!task.stopped && clockRolledBack) {
 				task.requestStop("clock_untrusted", "restore");
 				task.failure = "System wall clock is behind the last saved checkpoint";
 			}
@@ -454,9 +529,24 @@ export class TaskController {
 			policy: policy ? verifyPolicy(policy) : undefined,
 			domain: { id: domain.id, version: domain.version },
 		};
+		// 独立后端绝对截止时间与 TaskSpec 账本使用同一原始值。
+		if (executor.recoverExecution) executor.approvedDeadline = deadline;
 		executor.recordCommand = async (operation): Promise<void> => {
+			const previous = this.commands[operation.id - 1]?.external;
 			this.commands[operation.id - 1] = operation;
 			await this.commitLedger();
+			// Trace 只投影已提交状态。命令回执和产物摘要仍由原生账本管理。
+			const current = operation.external;
+			if (current && (current.status !== previous?.status || current.cancelRequested !== previous?.cancelRequested))
+				this.event("external_operation", {
+					operation_id: operation.id,
+					run_id: operation.runId,
+					backend: current.backend,
+					status: current.status,
+					token: current.token,
+					execution_id: current.observation?.id ?? current.submit?.id,
+					cancel_requested: current.cancelRequested,
+				});
 		};
 		// 目录可见不代表交付完成，保留中间进度供中断后的完整性核验。
 		executor.recordPublishedBest = async (): Promise<void> => {
@@ -1085,6 +1175,14 @@ export class TaskController {
 	}
 
 	private async finalize(): Promise<void> {
+		// 暂停时保留历史最优，但未对账的外部单元不能锁定最终交付。
+		if (
+			this.pendingRun &&
+			this.commands.some((op) => op.external && op.runId === this.pendingRun && op.status === "unknown")
+		) {
+			await this.persist();
+			return;
+		}
 		if (!this.delivered) {
 			const preference = this.spec.delivery_preference;
 			if (preference)

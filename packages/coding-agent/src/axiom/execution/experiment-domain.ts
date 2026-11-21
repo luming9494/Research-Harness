@@ -1,6 +1,7 @@
 // 实验控制器与领域适配器共用的任务、候选、评估及证据契约。
 import { type Static, Type } from "typebox";
 import { Check } from "typebox/value";
+import type { ExecutionReceipt } from "./execution-backend.ts";
 import type { ProcessResult, WorkerIdentity } from "./process.ts";
 import type { TaskBudget } from "./task-budget.ts";
 
@@ -11,6 +12,8 @@ export interface ExperimentTaskSpec {
 	max_revisions?: number;
 	fidelity?: { strategy: "full_only" | "multi_fidelity"; max_full: number };
 	delivery_preference?: DeliveryPreference;
+	// 审批只绑定宿主配置摘要，连接位置和凭据留在操作者侧。
+	backend?: { type: "docker" | "slurm"; profile_sha256: string };
 	budget: {
 		max_experiments: number;
 		wall_seconds: number;
@@ -163,6 +166,8 @@ export type WorkerOperation = {
 	timeoutMs: number;
 	reservation?: TrainingReservation;
 	stage?: TrainingStage | "review";
+	// 远程状态与启动回执和同一个原生操作一起提交。
+	external?: ExecutionReceipt;
 } & (
 	| { status: "pending" | "unknown"; identity?: WorkerIdentity }
 	| { status: "intent" | "not_started"; nonce: string }
@@ -207,11 +212,15 @@ export interface DurableExperimentAdapter extends ExperimentAdapter {
 	verifyCommand(operation: Extract<WorkerOperation, { recordSha256: string }>): Promise<void>;
 	verifyDelivery(best: RunResult, delivery: ArtifactManifest): Promise<void>;
 	isReadOnly(operation: WorkerOperation): boolean;
+	// 恢复只允许监控已登记的执行。适配器不得在此重新提交。
+	recoverExecution?(operation: WorkerOperation, signal: AbortSignal): Promise<RunResult>;
+	approvedDeadline?: number;
 }
 
 export interface ExperimentDomain {
 	id: string;
 	version: number;
+	externalExecution?: true;
 	validateSpec(input: unknown): ExperimentTaskSpec;
 	acceptsLegacy(spec: ExperimentTaskSpec): boolean;
 	open(input: {

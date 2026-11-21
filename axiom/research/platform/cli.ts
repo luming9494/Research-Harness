@@ -8,6 +8,9 @@ import type { TraceEvent } from "../../bench/trace.ts";
 import { TraceEvidence } from "../../bench/trace-evidence.ts";
 import { loadExperience } from "../../context/experience.ts";
 import { proposalModel, requestProposal } from "../../evolution/proposal-rpc.ts";
+import { verifySamples } from "../evidence.ts";
+import { loadPlan, readSamples } from "../execute.ts";
+import { paired } from "../report.ts";
 import { localEndpoint, request } from "./http.ts";
 import { bgeEncoder, type Catalog, indexMemory, memoryCollection, searchMemory } from "./memory.ts";
 import { projectMlflow } from "./mlflow.ts";
@@ -220,6 +223,7 @@ async function main(): Promise<void> {
 			join(repo, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python"),
 	);
 	const runs = await loadResearchRuns({ repo, python }, resolve(values.plan), values.sha.toLowerCase());
+	const plan = await loadPlan(resolve(values.plan), values.sha.toLowerCase());
 	if (!runs.length) throw new Error("No verified experiments to project");
 	const catalog: Catalog = {
 		version: 1,
@@ -227,9 +231,47 @@ async function main(): Promise<void> {
 			id: run.evidenceId,
 			taskId: run.taskId,
 			runId: run.runId,
-			experience: experienceFor(run),
+			experience: experienceFor(run, {
+				dataset: plan.controlled.dataset,
+				protocol: "tiny-validation-v1",
+				split: "validation",
+			}),
 		})),
 	};
+	// 成对结论只能来自同一个已核验矩阵，模板中不包含模型假设正文。
+	const samples = readSamples(resolve(values.plan), plan, values.sha.toLowerCase());
+	await verifySamples({ repo, python }, plan, values.sha.toLowerCase(), samples);
+	for (const hypothesis of plan.hypotheses) {
+		const rows = samples.filter(({ cell }) => cell.condition.id === hypothesis.comparison);
+		const baseline = samples.filter(({ cell }) => cell.condition.id === rows[0]?.cell.condition.reference);
+		const delta = paired(rows, baseline, hypothesis.metric);
+		const reference = rows[0];
+		const source = runs.find((run) => run.taskId === reference?.task_id && run.nativeRun === reference.run?.id);
+		if (!source || delta.absolute === null || delta.pairs !== plan.repeats) continue;
+		const evidence = sha256(
+			JSON.stringify([source.planSha, hypothesis, delta, [...rows, ...baseline].map((row) => row.evidence)]),
+		);
+		const { evidenceId } = identities(source.taskId, "matrix-finding", evidence);
+		catalog.entries.push({
+			id: evidenceId,
+			taskId: source.taskId,
+			runId: source.runId,
+			experience: {
+				...experienceFor(source, {
+					dataset: plan.controlled.dataset,
+					protocol: "tiny-validation-v1",
+					split: "validation",
+				}),
+				kind: "finding",
+				condition: "paired_comparison",
+				evidence_id: evidenceId,
+				sha256: evidence,
+				problem: `Paired Tiny CPU validation for ${hypothesis.comparison}`,
+				result: `Mean paired ${hypothesis.metric} difference ${delta.absolute.toFixed(6)} over ${delta.pairs} matched runs.`,
+				limits: "Descriptive within the frozen matrix and tested seeds. Check source settings before reuse.",
+			},
+		});
+	}
 	const bench =
 		values.bench && values["bench-sha"]
 			? await benchArchive(resolve(values.bench), values["bench-sha"].toLowerCase())

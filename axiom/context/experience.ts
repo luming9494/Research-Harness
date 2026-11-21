@@ -7,6 +7,8 @@ import { TraceEvidence } from "../bench/trace-evidence.ts";
 
 export interface Experience {
 	task: "tiny-xor-v1";
+	scope?: { dataset: string; protocol: "tiny-validation-v1"; split: "validation" };
+	kind?: "hyperparameter" | "result" | "finding";
 	condition: string;
 	problem: string;
 	result: string;
@@ -14,6 +16,26 @@ export interface Experience {
 	sha256: string;
 	revalidated: boolean;
 	limits: string;
+}
+
+// 审查经验只解释结构规则。可比较的结果必须绑定同一数据与评分协议。
+export function applicableExperience(
+	item: Experience,
+	task: string,
+	scope: Experience["scope"],
+	failure?: string,
+): boolean {
+	return (
+		item.task === task &&
+		item.revalidated &&
+		(item.condition === "static_review"
+			? failure === "invalid_candidate"
+			: !!item.kind &&
+				!!scope &&
+				item.scope?.dataset === scope.dataset &&
+				item.scope.protocol === scope.protocol &&
+				item.scope.split === scope.split)
+	);
 }
 
 // 仅接纳实际运行的定型失效。原始根因假设、自由文本和日志不会进入经验层。

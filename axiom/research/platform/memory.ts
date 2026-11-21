@@ -2,7 +2,7 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { runProcess } from "../../../packages/coding-agent/src/axiom/execution/process.ts";
-import { sha256 } from "../../bench/io.ts";
+import { digest, sha256 } from "../../bench/io.ts";
 import type { Experience } from "../../context/experience.ts";
 import { localEndpoint, PlatformHttpError, request } from "./http.ts";
 
@@ -56,7 +56,13 @@ export function bgeEncoder(repo: string): Encoder {
 			process.platform === "win32"
 				? ["-d", "Ubuntu-24.04", "--exec", python, wslPath(script), ...args]
 				: [script, ...args];
-		const result = await runProcess(command, call, { cwd: repo, home: repo, timeoutMs: 10_000, maxBytes: 500_000 });
+		// 批量索引可与本地训练并行，查询仍使用较短的交互时限。
+		const result = await runProcess(command, call, {
+			cwd: repo,
+			home: repo,
+			timeoutMs: mode === "document" ? 30_000 : 10_000,
+			maxBytes: 500_000,
+		});
 		if (result.code !== 0 || result.stopped) throw new Error("Pinned BGE encoder unavailable");
 		const output: unknown = JSON.parse(result.stdout);
 		if (
@@ -106,6 +112,7 @@ export async function indexMemory(origin: URL, catalog: Catalog, encode: Encoder
 					condition: experience.condition,
 					evidence_sha256: experience.sha256,
 					status: "revalidated",
+					...(experience.scope ? { task: experience.task, ...experience.scope } : {}),
 				},
 			})),
 		});
@@ -120,9 +127,14 @@ export async function searchMemory(
 	query: string,
 	condition?: string,
 	limit = 3,
+	scope?: Experience["scope"],
 ): Promise<MemoryEntry[]> {
 	const must = [{ key: "status", match: { value: "revalidated" } }];
 	if (condition) must.push({ key: "condition", match: { value: condition } });
+	// 远端过滤和固定本地目录各核对一次，防止相似向量绕过协议边界。
+	if (scope)
+		for (const [key, value] of Object.entries({ task: "tiny-xor-v1", ...scope }))
+			must.push({ key, match: { value } });
 	const [vector] = await encode([query], "query");
 	const response = await request<{ result: { points: { id: unknown; payload: Record<string, unknown> }[] } }>(
 		origin,
@@ -143,7 +155,14 @@ export async function searchMemory(
 				payload.task_id !== source.taskId ||
 				payload.evidence_sha256 !== source.experience.sha256 ||
 				payload.condition !== source.experience.condition ||
-				(condition && source.experience.condition !== condition)
+				(condition && source.experience.condition !== condition) ||
+				(scope &&
+					(!source.experience.kind ||
+						payload.task !== source.experience.task ||
+						Object.entries(scope).some(([key, value]) => payload[key] !== value) ||
+						source.experience.scope?.dataset !== scope.dataset ||
+						source.experience.scope.protocol !== scope.protocol ||
+						source.experience.scope.split !== scope.split))
 			)
 				return [];
 			accepted.add(source.id);
@@ -153,7 +172,20 @@ export async function searchMemory(
 }
 
 // 会话读取经操作者批准的本地目录摘要，异常自动退回原经验来源。
-export async function configuredMemory(repo: string): Promise<Experience[] | undefined> {
+export async function tinyMemoryScope(repo: string): Promise<NonNullable<Experience["scope"]>> {
+	// 复用科研矩阵为 Tiny 冻结的数据生成器身份。
+	return {
+		dataset: sha256(JSON.stringify([await digest(repo, "examples/tiny-ml-eval/common.py")])),
+		protocol: "tiny-validation-v1",
+		split: "validation",
+	};
+}
+
+export async function configuredMemory(
+	repo: string,
+	query: string,
+	scope: Experience["scope"],
+): Promise<Experience[] | undefined> {
 	const path = process.env.AXIOM_MEMORY_CATALOG;
 	const sha = process.env.AXIOM_MEMORY_CATALOG_SHA;
 	const endpoint = process.env.AXIOM_QDRANT_ENDPOINT;
@@ -166,12 +198,7 @@ export async function configuredMemory(repo: string): Promise<Experience[] | und
 		if (catalog.version !== 1) throw new Error("Unsupported memory catalog");
 		const origin = localEndpoint(endpoint);
 		await request(origin, `/collections/${memoryCollection(catalog)}`);
-		const rows = await searchMemory(
-			origin,
-			catalog,
-			bgeEncoder(repo),
-			"Tiny validation research learning rates and candidate structure failures",
-		);
+		const rows = await searchMemory(origin, catalog, bgeEncoder(repo), query.slice(0, 400), undefined, 3, scope);
 		return rows.map(({ experience }) => experience);
 	} catch {
 		return [];

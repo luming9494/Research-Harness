@@ -3,7 +3,7 @@ import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { TaskController } from "../../packages/coding-agent/src/axiom/execution/task-controller.ts";
 import { file, sha256 } from "../bench/io.ts";
 import { type ArtifactReference, artifactsFor } from "./artifacts.ts";
-import type { Experience } from "./experience.ts";
+import { applicableExperience, type Experience } from "./experience.ts";
 
 export type Snapshot = ReturnType<TaskController["snapshot"]>;
 type State = ReturnType<TaskController["contextState"]>;
@@ -33,6 +33,7 @@ export interface ContextOptions {
 	priorities?: Partial<Record<Layer, number>>;
 	resumed?: boolean;
 	errorDetail?: "category" | "reason";
+	experienceScope?: Experience["scope"];
 }
 export interface ContextWindow {
 	schema_version: 1;
@@ -222,13 +223,9 @@ export async function buildContext(
 				stage: op.stage ?? "full",
 				status: op.status,
 			})),
-		experience: memory.filter(
-			(item) =>
-				item.task === snapshot.task.task &&
-				item.revalidated &&
-				failure &&
-				failure.category === "invalid_candidate" &&
-				item.condition === "static_review",
+		// 仅将当前任务可用的事实交给已有窗口预算。
+		experience: memory.filter((item) =>
+			applicableExperience(item, snapshot.task.task, options.experienceScope, failure?.category),
 		),
 		artifacts: artifactsFor(state.evaluated).reverse(),
 	};

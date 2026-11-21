@@ -15,7 +15,7 @@ import { buildContext, candidateStructure, ledgerCompaction, type Snapshot } fro
 import { type Experience, loadExperience } from "../context/experience.ts";
 import { openTaskPolicy } from "../context/policy-loader.ts";
 import { configuredTinyDomain } from "../execution/tiny.ts";
-import { configuredMemory } from "../research/platform/memory.ts";
+import { configuredMemory, tinyMemoryScope } from "../research/platform/memory.ts";
 import { bestEffortOtlp, type Signal } from "../research/platform/otlp.ts";
 import { identities } from "../research/platform/run.ts";
 
@@ -53,6 +53,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
   let allowed = names;
   let resumed = false;
   let experience: Experience[] = [];
+  let experienceScope: Experience["scope"];
   let experienceStatus: "unconfigured" | "revalidated" | "semantic" | "unavailable" = "unconfigured";
   let observations: Signal[] = [];
   let sessionStart = 0;
@@ -66,7 +67,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
     return controller.contextState ? buildContext(controller.root, snapshot, controller.contextState(),
       experience.slice(0, policy.config.settings.experience_limit),
       { resumed, maxTokens: policy.config.settings.window_tokens, priorities: policy.config.settings.priorities,
-        errorDetail: policy.config.settings.error_detail }) : undefined;
+        errorDetail: policy.config.settings.error_detail, experienceScope }) : undefined;
   };
   const close = async () => {
     if (!active || !task) return;
@@ -196,6 +197,7 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       }
       task = controller;
       experience = [];
+      experienceScope = undefined;
       experienceStatus = "unconfigured";
       if (useContext && process.env.AXIOM_CONTEXT_EXPERIENCE) {
         // 经验路径由操作者设定，不接受工具参数指定归档。
@@ -204,7 +206,10 @@ export function registerTaskExtension(pi: ExtensionAPI, tinyActive: () => boolea
       }
       if (useContext && !host.comparison) {
         // 向量服务失败时原可信经验仍在工作窗口中。
-        const semantic = await configuredMemory(repo);
+        experienceScope = await tinyMemoryScope(repo).catch(() => undefined);
+        const semantic = experienceScope && await configuredMemory(repo,
+          `${status.task.task} validation ${status.baseline ? "candidate optimization" : "baseline planning"} ${status.failure_category ?? ""} ${status.task.goal}`,
+          experienceScope);
         if (semantic?.length) {
           experience = [...new Map([...semantic, ...experience].map((row) => [row.evidence_id, row])).values()];
           experienceStatus = "semantic";

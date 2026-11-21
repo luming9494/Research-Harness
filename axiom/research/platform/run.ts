@@ -117,10 +117,12 @@ export async function loadResearchRuns(runtime: Runtime, root: string, sha: stri
 }
 
 // 入库文字由固定模板和数值生成，不复制假设中的自由文本、标签或日志。
-export function experienceFor(run: PublishedRun): Experience {
+export function experienceFor(run: PublishedRun, scope: NonNullable<Experience["scope"]>): Experience {
 	const p = run.parameters;
 	return {
 		task: "tiny-xor-v1",
+		kind: "hyperparameter",
+		scope,
 		condition: "learning_rate",
 		problem: `Learning-rate validation under fixed initialization seed ${p.seed}`,
 		result: `Adam learning rate ${p.learning_rate}, ${p.epochs} epochs, validation accuracy ${run.metrics.accuracy.toFixed(6)}, loss ${run.metrics.loss.toFixed(6)}.`,

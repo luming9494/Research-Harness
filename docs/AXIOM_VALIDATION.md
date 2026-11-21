@@ -1,5 +1,11 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-14 科研工作区与论文证据图
+
+合并 WP-11.2 的九次真实 Tiny CPU 运行，形成三个配对对照组。正常 Pi 会话引用获准历史经验并建议学习率。项目计划重启续跑 6/6 单元，保留首单元的三条原操作。QC-DETR E2 仍是未复验历史记录。Qdrant 停机期间项目仍可读取，复机后恢复外部关联。[命令、限制与原始证据](AXIOM_RESEARCH_WORKSPACE.md)
+
+WSL2 执行 `npm run build:offline` 和 `AXIOM_ML_TEST_CONCURRENCY=1 npm run test:ml`，全量 **166/166**（Python 18、Node 128、机制 3、Pi 17）。Windows 静态检查与定向测试通过。真实 Pi 调用 3 次共 5,089 Token，Pi 估算 USD 0.001524840。
+
 ## WP-13 科研记忆与可观测性
 
 Windows 与 WSL2 Docker 真实服务验收使用 Qdrant 1.13.6、Collector Contrib 0.119.0、MLflow 3.5.1。9 条研究 Run 复用真实 Tiny CPU 训练和独立评价，10 个证据点通过 Qdrant 检索。复核了 Docker 原任务的后端状态、恢复和交付轨迹，以及同一研究运行在三项服务间的身份、摘要和训练曲线。真实 Pi 调用四次，3,615 Token，估算 USD 0.000926208。真实检索效果、失败样本、命令和证据路径见 [WP-13 科研平台](AXIOM_RESEARCH_PLATFORM.md)。

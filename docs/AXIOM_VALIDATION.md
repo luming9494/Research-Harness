@@ -1,5 +1,15 @@
 # AXIOM 验收：WP-04、原生基座与真实 LLM 记录
 
+## WP-10.2 Hybrid 科研检索与可信重放
+
+`RAG-HYBRID-01` 使用固定 BGE Small v1.5 ONNX 与 SciFact 数据，真实 DeepSeek Flash 两轮参数决策。强杀 Pi 后恢复同一任务，四条已核验操作无重跑，只新增第五条。开发 nDCG@10 优胜项为 exp-4 的 0.556479。留出 nDCG@10 为 0.532930，BM25 为 0.507739，Dense 为 0.534276。正式双轴均 100，离线重放 9 组、5,245 条查询并核验 37 个文件。[模型、分片、证据与完整对照](AXIOM_HYBRID_RAG.md)
+
+正式运行 6 请求、19,774 Token，Pi 估计 USD 0.003709524。首次预检计入后为 8 请求、23,458 Token、Pi 估计 USD 0.004228080。共享文档编码、查询编码、候选索引与评分、模型请求分别记账。统一入口混合批次达到 2/2 预期，旧 Tiny 与旧 RAG 归档均复核通过。对改过排名并刷新摘要的独立副本，重放拒绝。损坏权重与矩阵凭证均有定向拒绝证据。
+
+Windows 与 WSL2 的 `npm run build:offline` 通过。Windows `npm run check` 通过，RAG 定向测试 8/8。WSL2 的 `AXIOM_ML_TEST_CONCURRENCY=1 npm run test:ml` 为 **140/140**，其中 Python 18、Node 主批 102、机制批 3、原生 Pi 17。Windows 与 WSL2 的同次 Hybrid 归档离线复验均通过。WSL2 的原始日志位于 `private/wp102/test-wsl.log`。
+
+Windows 以同样的单并发运行 `npm run test:ml`，全量 **140/140**。Python 18、Node 主批 102、机制批 3、原生 Pi 17 均通过。Windows 原始日志位于 `private/wp102/test-windows.log`。两平台使用原回归断言与超时。
+
 ## WP-10.1 科研检索优化
 
 真实 Pi 使用 DeepSeek Flash 两轮提出 SciFact BM25 参数，第一轮提交后强杀 Pi 并从原 Task ID 恢复。参数收益复验的开发集 nDCG@10 从 0.516873 到 0.519698，留出从 0.507739 到 0.508209，留出 Recall@10 从 0.582500 到 0.571389。最终代码复验中两轮候选低于基线，按规则交付基线，并产出 33 条 Trace 事件。最终真实 Case 和确定性机制 Case 的任务轴、机制轴均为 100。三次真实运行累计 18 请求、36,887 Token，Pi 估计 USD 0.006944076。每次完成运行仅记录三个不同成功检索操作，训练步数为零。[固定资产、完整指标、费用与证据](AXIOM_RAG_EXPERIMENT.md)

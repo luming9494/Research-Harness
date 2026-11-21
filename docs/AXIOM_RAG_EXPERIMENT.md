@@ -1,5 +1,7 @@
 # WP-10.1 · 科研检索优化
 
+WP-10.2 将此协议纳入统一 Benchmark 并增加可信重放。保留以下历史结果，并使用原分片、BM25 实现和双轴规则重新核验。[Hybrid、固定 BGE 与复验命令](AXIOM_HYBRID_RAG.md)
+
 AXIOM 的第二个实验领域是 SciFact 文档检索。原生 Pi Session 提出有界 BM25 参数，TaskController 审批、准入、去重和选优，Pi Durable 保存操作和预算。开发集用于选优，宿主在 Pi 退出并核验交付后才读取留出标注。
 
 ## 数据与复现

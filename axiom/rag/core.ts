@@ -2,14 +2,16 @@
 import { appendFile, mkdir, mkdtemp } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { TaskController } from "../../packages/coding-agent/src/axiom/execution/task-controller.ts";
-import { scoreAxis } from "../bench/grader.ts";
 import { digest, file, json, save } from "../bench/io.ts";
 import { openExperimentLedger } from "../durable/experiment-ledger.ts";
 import { checkpoint, taskSpec } from "./benchmark.ts";
 import { baseline } from "./bm25.ts";
 import { ragDomain } from "./domain.ts";
+import { type CoreObservation, gradeCore } from "./grading.ts";
+import { saveRetrievalTrace } from "./trace.ts";
 
 export async function runCoreCase(repo: string, data: string, out: string): Promise<string> {
+	const started_at = new Date().toISOString();
 	await mkdir(out, { recursive: true });
 	const root = await mkdtemp(join(out, "rag-core-"));
 	const domain = ragDomain(resolve(data));
@@ -81,48 +83,36 @@ export async function runCoreCase(repo: string, data: string, out: string): Prom
 		corruptError = error instanceof Error ? error.message : null;
 	}
 	await json(root, "case.json", { case_id: "RAG-CORE-01", version: 1, mode: "fixed_parameters", spec });
-	await json(root, "observations.json", {
-		task_id: id,
+	const observation: CoreObservation = {
 		snapshots,
 		saved,
 		restored: state,
 		policy_error: policyError,
 		exhausted_error: exhaustedError,
 		corrupt_error: corruptError,
-	});
-	const runs = saved.commands.filter(({ status }) => status === "completed");
-	const proofs = ["observations.json", "retrieval/delivery.json"];
-	const grade = (checks: Record<string, boolean>): ReturnType<typeof scoreAxis> =>
-		scoreAxis(
-			Object.keys(checks).map((id) => ({ id, weight: 1 })),
-			Object.fromEntries(Object.entries(checks).map(([id, valid]) => [id, { valid, evidence: proofs }])),
-		);
+	};
+	await json(root, "observations.json", { task_id: id, ...observation });
+	await json(root, "checkpoint-after.json", saved);
+	paths.push("checkpoint-after.json");
+	for (const op of saved.commands) await copy(`commands/${op.id}.json`);
+	const grades = gradeCore(observation);
+	const traceRun = { case_id: "RAG-CORE-01", run_id: basename(root), started_at, status: "completed" };
+	// 派生轨迹使用与真实 Case 相同的账本证据与归因规则。
+	const trace = await saveRetrievalTrace(
+		root,
+		traceRun,
+		await Promise.all(
+			paths.filter((path) => path !== "result.json" && path !== "report.md").map((path) => digest(root, path)),
+		),
+		grades,
+	);
+	paths.push(...trace);
 	const result = {
-		case_id: "RAG-CORE-01",
-		run_id: basename(root),
+		...traceRun,
 		task_id: id,
-		task_success: grade({
-			independently_scored_baseline_and_candidate:
-				!!state.baseline && !!state.delivery && saved.evaluated.length === 3,
-		}),
-		harness_correctness: grade({
-			invalid_candidate_rejected:
-				snapshots.invalid.failure_category === "invalid_candidate" && snapshots.invalid.budget.experiments === 0,
-			holdout_access_denied: policyError?.startsWith("Permission denied") === true,
-			deduplicated:
-				snapshots.reused.experiments.at(-1)?.reused_from === "baseline" &&
-				snapshots.reused.budget.experiments === 0 &&
-				runs.length === 3 &&
-				new Set(runs.map((run) => run.fingerprint)).size === 3,
-			budget_not_refunded:
-				state.stop_reason === "experiment_budget_exhausted" &&
-				exhaustedError?.includes("experiment_budget_exhausted") === true &&
-				state.budget.experiments === 2 &&
-				state.budget.training_steps_reserved === 0 &&
-				state.remaining.experiments === 0 &&
-				JSON.stringify(state.budget) === JSON.stringify(saved.summary.budget),
-			corrupted_evidence_rejected: corruptError === "Ranking receipt digest mismatch",
-		}),
+		...grades,
+		trace,
+		budget: saved.summary.budget,
 		usage: { requests: 0, tokens: 0, estimated_cost_usd: 0 },
 	};
 	await json(root, "result.json", result);

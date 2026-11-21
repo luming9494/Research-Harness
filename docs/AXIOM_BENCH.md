@@ -4,7 +4,7 @@ AXIOM-Bench 从两条证据链分别评估任务达成和 Harness 正确性。�
 
 ## 运行
 
-WP-10.1 增加检索协议的 `RAG-CORE-01` 和 `RAG-LIVE-01`。检索 CLI 复用双轴评分、证据路径验证和归因接口，以独立入口保持历史 Tiny 评分文件身份。两类检索归档均可按外部清单 SHA-256 离线重算。[SciFact Case、命令与结果](AXIOM_RAG_EXPERIMENT.md)
+统一入口支持 Tiny 与 `RAG-CORE-01`、`RAG-LIVE-01`、`RAG-HYBRID-01` 的发现、批次与复核。混合 Case 批次的成功率使用计划数，任务与机制状态逐 Case 保留。检索复核使用外部清单 SHA-256，并重放索引与排名。旧 Tiny Case 的输入身份与判题协议沿用原入口。[Hybrid Case、命令与结果](AXIOM_HYBRID_RAG.md)
 
 ```powershell
 npm run build:offline

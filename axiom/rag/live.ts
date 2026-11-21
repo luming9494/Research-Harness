@@ -2,7 +2,8 @@
 import { spawn } from "node:child_process";
 import { isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
-import type { RagTaskSpec } from "./domain.ts";
+import type { DenseSource } from "./dense.ts";
+import { hybridProtocol, type RagTaskSpec } from "./domain.ts";
 
 interface Event {
 	id?: string;
@@ -42,6 +43,7 @@ export function drivePi(
 	modelId: string,
 	signal: AbortSignal,
 	resumeId?: string,
+	embedding?: DenseSource,
 ): Promise<Epoch> {
 	const agentDir =
 		process.env.AXIOM_BENCH_AGENT_DIR ??
@@ -80,6 +82,8 @@ export function drivePi(
 					...process.env,
 					PI_CODING_AGENT_DIR: agentDir,
 					AXIOM_RAG_DATA: data,
+					AXIOM_RAG_VECTOR_ROOT: embedding?.root,
+					AXIOM_RAG_VECTOR_SHA: embedding?.sha,
 					AXIOM_RAG_BARRIER: resumeId ? "0" : "1",
 				},
 			},
@@ -140,12 +144,15 @@ export function drivePi(
 							fail("Recovery changed Task ID");
 							return;
 						}
+						// 混合协议先冻结两个额外对照，第一条自主候选因而是 exp-3。
+						const hybrid = spec.task === hybridProtocol;
+						const first = hybrid ? "exp-3" : "exp-1";
 						send({
 							id: "research",
 							type: "prompt",
 							message: resumeId
-								? "Inspect the recovered task first. Use exp-1's actual development feedback to propose and evaluate one distinct new BM25 configuration citing exp-1. After that result, call finish."
-								: "Inspect the task, run the fixed baseline, then use its measured development feedback to propose and evaluate a distinct BM25 configuration. Call at most one tool per model turn. The operator will interrupt the process after that candidate is committed.",
+								? `Inspect the recovered task first. Use ${first}'s actual development feedback to propose and evaluate one distinct new valid retrieval configuration citing ${first}. After that result, call finish. For hybrid proposals use the approved strategy-specific schema.`
+								: `Inspect the task, run the fixed ${hybrid ? "BM25, Dense, and RRF controls" : "baseline"}, then use measured development feedback to propose and evaluate a distinct ${hybrid ? "retrieval" : "BM25"} configuration. Call at most one tool per model turn. The operator will interrupt the process after that candidate is committed.`,
 						});
 					}
 					if (e.message === "AXIOM RAG model admitted") epoch.admitted++;

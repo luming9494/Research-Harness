@@ -27,7 +27,8 @@ AXIOM 是面向自主科研的自进化 Agent Harness。当前实验控制层承
 | WP-08.2 | 策略白名单与 Durable 身份绑定、Benchmark 本地观测导出、原生 Compaction 恢复。独立固定训练入口已在 Windows WSL2 Docker 完成真实验收。[策略治理](AXIOM_POLICY_GOVERNANCE.md) · [隔离与观测](AXIOM_SANDBOX_OBSERVABILITY.md) | 审阅基线 |
 | WP-09.1 | 复核开发失败证据，原生 Pi RPC 生成两轮策略候选，固定开发 Case 独立评测并记录筛选结论。[策略进化](AXIOM_SELF_EVOLUTION.md) | 已通过独立静态审阅 |
 | WP-09.2 | 冻结候选、独立留出、复核发布、SQLite 策略指针及受控回滚。[发布与回滚](AXIOM_POLICY_RELEASE.md) | 等待独立审阅 |
-| WP-10.1 | SciFact BM25 接入同一任务内核，真实 Pi 两轮候选跨进程恢复，宿主独立留出复核。Monitor 三态治理。[科研检索验收](AXIOM_RAG_EXPERIMENT.md) | 等待独立审阅 |
+| WP-10.1 | SciFact BM25 接入同一任务内核，真实 Pi 两轮候选跨进程恢复，宿主独立留出复核。Monitor 三态治理。[科研检索验收](AXIOM_RAG_EXPERIMENT.md) | 独立静态审阅通过 |
+| WP-10.2 | 固定 BGE 本地 Dense、BM25 与 RRF，真实候选跨会话恢复，统一评测与独立排名重放。[Hybrid 验收](AXIOM_HYBRID_RAG.md) | 等待独立审阅 |
 | 后续 | 规划中 | 第二类 AI 任务、跨任务评测、Ablate、Reproduce 和远程 GPU Runner |
 
 ## 两个优化循环

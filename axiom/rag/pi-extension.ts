@@ -11,39 +11,58 @@ import { file } from "../bench/io.ts";
 import { openExperimentLedger } from "../durable/experiment-ledger.ts";
 import { searchSpace } from "./bm25.ts";
 import { ragDomain, validateSpec } from "./domain.ts";
+import { denseControl, fusionControl, hybridSpace } from "./hybrid.ts";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 const empty = Type.Object({}, { additionalProperties: false });
-const tools = {
-	inspect: {
-		description: "Read approved settings, history, verified development metrics and remaining budget.",
-		parameters: empty,
-	},
-	baseline: { description: "Build and independently evaluate the fixed BM25 baseline once.", parameters: empty },
-	candidate: {
-		description:
-			"Evaluate a new complete approved BM25 configuration. Cite a verified parent experiment and explain your hypothesis using observed development feedback.",
-		parameters: Type.Object(
-			{
-				parent: Type.String({ pattern: "^(baseline|exp-[1-9][0-9]*)$" }),
-				rationale: Type.String({ minLength: 1, maxLength: 2000 }),
-				parameters: searchSpace,
-			},
-			{ additionalProperties: false },
-		),
-	},
-	finish: {
-		description: "Deliver the verified highest development nDCG@10 configuration and stop.",
-		parameters: empty,
-	},
-} as const;
+// 工具声明只暴露当前任务批准的参数协议。
+function taskTools(hybrid: boolean): {
+	[K in "inspect" | "baseline" | "candidate" | "finish"]: {
+		description: string;
+		parameters: ReturnType<typeof Type.Object>;
+	};
+} {
+	return {
+		inspect: {
+			description: "Read approved settings, history, verified development metrics and remaining budget.",
+			parameters: empty,
+		},
+		baseline: {
+			description: hybrid
+				? "Build and independently score the fixed BM25, Dense, and RRF controls once."
+				: "Build and independently evaluate the fixed BM25 baseline once.",
+			parameters: empty,
+		},
+		candidate: {
+			description:
+				"Evaluate a new complete approved retrieval configuration. Cite a verified parent experiment and explain your hypothesis using observed development feedback.",
+			parameters: Type.Object(
+				{
+					parent: Type.String({ pattern: "^(baseline|exp-[1-9][0-9]*)$" }),
+					rationale: Type.String({ minLength: 1, maxLength: 2000 }),
+					parameters: hybrid ? hybridSpace : searchSpace,
+				},
+				{ additionalProperties: false },
+			),
+		},
+		finish: {
+			description: "Deliver the verified highest development nDCG@10 configuration and stop.",
+			parameters: empty,
+		},
+	};
+}
 const names = ["inspect", "baseline", "candidate", "finish"] as const;
 
 export default function extension(pi: ExtensionAPI): void {
 	let controller: TaskController | undefined;
 	const dataRoot = process.env.AXIOM_RAG_DATA;
 	if (!dataRoot) throw new Error("Set the operator-only SciFact asset directory");
-	const domain = ragDomain(dataRoot);
+	const cacheRoot = process.env.AXIOM_RAG_VECTOR_ROOT;
+	const cacheSha = process.env.AXIOM_RAG_VECTOR_SHA;
+	if (!!cacheRoot !== !!cacheSha) throw new Error("Dense cache requires an operator-pinned manifest");
+	const embedding = cacheRoot && cacheSha ? { root: cacheRoot, sha: cacheSha } : undefined;
+	const domain = ragDomain(dataRoot, embedding);
+	const tools = taskTools(!!embedding);
 	const activeNames = names.map((name) => `axiom_rag_${name}`);
 	const activate = async (task: TaskController, ctx: ExtensionCommandContext): Promise<void> => {
 		controller = task;
@@ -114,11 +133,29 @@ export default function extension(pi: ExtensionAPI): void {
 				// Pi 已校验工具 Schema，统一转成控制器接收的参数映射。
 				const parametersByName: Record<string, unknown> = { ...input };
 				const { parent, ...parameters } = parametersByName;
-				const state = await task.invoke(
+				if (embedding && name === "candidate" && task.contextState().evaluated.length < 3)
+					throw new Error("Run the three fixed controls before autonomous candidates");
+				let state = await task.invoke(
 					name,
 					name === "candidate" ? { ...parameters, content: parent } : parametersByName,
 					signal,
 				);
+				// 固定对照走同一账本准入，已经提交的对照在重复工具调用时直接复用。
+				if (embedding && name === "baseline") {
+					for (const [index, config] of [denseControl, fusionControl].entries()) {
+						if (task.stopped || task.contextState().evaluated.length > index + 1) continue;
+						state = await task.invoke(
+							"candidate",
+							{
+								content: "baseline",
+								rationale: "Frozen operator control",
+								parameters: config,
+							},
+							signal,
+						);
+						if (state.failure_category) break;
+					}
+				}
 				// 候选评测和账本已提交，冻结当前工具直到宿主强制退出 Pi。
 				if (
 					process.env.AXIOM_RAG_BARRIER === "1" &&

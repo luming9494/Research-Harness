@@ -17,11 +17,22 @@ import {
 } from "../../packages/coding-agent/src/axiom/execution/experiment-domain.ts";
 import { BudgetStop } from "../../packages/coding-agent/src/axiom/execution/task-budget.ts";
 import { digest, file, json, sha256 } from "../bench/io.ts";
-import { baseline, configOf, retrieve, searchSpace } from "./bm25.ts";
+import { baseline, type Config, configOf, retrieve, searchSpace } from "./bm25.ts";
+import { type DenseSource, loadDense } from "./dense.ts";
+import {
+	type HybridConfig,
+	hybridConfigOf,
+	hybridSpace,
+	relevantMetrics,
+	retrieveHybrid,
+	sparseControl,
+} from "./hybrid.ts";
 import { loadDataset } from "./scifact.ts";
 import { score } from "./score.ts";
 
 export const protocol = "scifact-bm25-v1";
+export const hybridProtocol = "scifact-hybrid-v2";
+const hash = Type.String({ pattern: "^[a-f0-9]{64}$" });
 export const taskSchema = Type.Object(
 	{
 		version: Type.Literal(1),
@@ -44,10 +55,26 @@ export const taskSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
-export type RagTaskSpec = Static<typeof taskSchema>;
+const hybridTaskSchema = Type.Object(
+	{
+		...taskSchema.properties,
+		version: Type.Literal(2),
+		task: Type.Literal(hybridProtocol),
+		search_space: hybridSpace,
+		embedding_manifest_sha256: hash,
+	},
+	{ additionalProperties: false },
+);
+export type HybridTaskSpec = Static<typeof hybridTaskSchema>;
+export type RagTaskSpec = Static<typeof taskSchema> | HybridTaskSpec;
 
 // 审批中的 search_space 固定绑定协议默认配置，允许范围由同一版本的 Schema 定义。
 export function validateSpec(input: unknown): RagTaskSpec {
+	if (
+		Check(hybridTaskSchema, input) &&
+		JSON.stringify(hybridConfigOf(input.search_space)) === JSON.stringify(sparseControl)
+	)
+		return input;
 	if (!Check(taskSchema, input) || JSON.stringify(configOf(input.search_space)) !== JSON.stringify(baseline))
 		throw new Error("Invalid approved SciFact TaskSpec");
 	return input;
@@ -55,7 +82,6 @@ export function validateSpec(input: unknown): RagTaskSpec {
 
 const fraction = Type.Number({ minimum: 0, maximum: 1 });
 const nonnegative = Type.Number({ minimum: 0 });
-const hash = Type.String({ pattern: "^[a-f0-9]{64}$" });
 const validationSchema = Type.Object(
 	{
 		recall5: fraction,
@@ -71,6 +97,19 @@ const validationSchema = Type.Object(
 		index_sha256: hash,
 		receipt_sha256: hash,
 		proposal_sha256: hash,
+		relevant: Type.Optional(
+			Type.Object(
+				{
+					queries: Type.Integer({ minimum: 1 }),
+					recall5: fraction,
+					recall10: fraction,
+					ndcg10: fraction,
+					mrr10: fraction,
+				},
+				{ additionalProperties: false },
+			),
+		),
+		peak_rss_kib: Type.Optional(Type.Integer({ minimum: 1 })),
 	},
 	{ additionalProperties: false },
 );
@@ -78,7 +117,7 @@ const receiptSchema = Type.Object(
 	{
 		dataset: hash,
 		fingerprint: hash,
-		config: searchSpace,
+		config: Type.Union([searchSpace, hybridSpace]),
 		rankings: Type.Array(
 			Type.Object(
 				{
@@ -92,13 +131,15 @@ const receiptSchema = Type.Object(
 		build_ms: nonnegative,
 		index_bytes: Type.Integer({ minimum: 1 }),
 		index_sha256: hash,
+		peak_rss_kib: Type.Optional(Type.Integer({ minimum: 1 })),
 	},
 	{ additionalProperties: false },
 );
 
 // 固定检索器、评分器和输入解析器的源码身份，版本内改变实现也会拒绝恢复。
-export async function implementationSha(): Promise<string> {
+export async function implementationSha(hybrid = false): Promise<string> {
 	const files = ["bm25.ts", "score.ts", "scifact.ts", "domain.ts"];
+	if (hybrid) files.push("dense.ts", "hybrid.ts", "embed.py");
 	return sha256(
 		JSON.stringify(
 			await Promise.all(
@@ -110,21 +151,38 @@ export async function implementationSha(): Promise<string> {
 	);
 }
 
-export function ragDomain(dataRoot: string): ExperimentDomain {
+// 任务级身份包含开发矩阵清单，恢复时要求使用同一份已审批缓存。
+export function ragDomain(dataRoot: string, denseSource?: DenseSource): ExperimentDomain {
+	const domainId = denseSource ? hybridProtocol : protocol;
 	return {
-		id: protocol,
-		version: 1,
+		id: domainId,
+		version: denseSource ? 2 : 1,
 		validateSpec,
 		acceptsLegacy: (): boolean => false,
 		async open({ root, budget, saved, commandCount = 0 }): Promise<DurableExperimentAdapter> {
-			const [data, implementation] = await Promise.all([loadDataset(dataRoot, "development"), implementationSha()]);
-			const identity = { dataset: data.fingerprint, implementation };
-			if (saved && (saved.dataset !== identity.dataset || saved.implementation !== identity.implementation))
+			const spec = validateSpec(budget.spec);
+			if (denseSource && (spec.task !== hybridProtocol || spec.embedding_manifest_sha256 !== denseSource.sha))
+				throw new ExperimentFailure("permission_violation", "Embedding manifest was not approved");
+			const [data, implementation] = await Promise.all([
+				loadDataset(dataRoot, "development"),
+				implementationSha(!!denseSource),
+			]);
+			const dense = denseSource && (await loadDense(denseSource, data, "development"));
+			const identity = { dataset: data.fingerprint, implementation, ...(dense && { embedding: dense.manifestSha }) };
+			if (
+				saved &&
+				(saved.dataset !== identity.dataset ||
+					saved.implementation !== identity.implementation ||
+					saved.embedding !== identity.embedding)
+			)
 				throw new ExperimentFailure("evidence_integrity", "Retrieval dataset or implementation changed");
+			const baseConfig = dense ? sparseControl : baseline;
+			const configOfDomain = (input: unknown): Config | HybridConfig =>
+				dense ? hybridConfigOf(input) : configOf(input);
 			const documentIds = new Set(data.documents.map(({ id }) => id));
 			let sequence = commandCount;
-			const fingerprint = (config: ReturnType<typeof configOf>): string =>
-				sha256(JSON.stringify([protocol, identity, config]));
+			const fingerprint = (config: Config | HybridConfig): string =>
+				sha256(JSON.stringify([domainId, identity, config]));
 			const verified = new Set<string>();
 			const verifyRun = async (run: RunResult): Promise<void> => {
 				const path = `retrieval/${run.id}/rankings.json`;
@@ -141,8 +199,8 @@ export function ragDomain(dataRoot: string): ExperimentDomain {
 					!Check(receiptSchema, receipt) ||
 					receipt.dataset !== identity.dataset ||
 					receipt.fingerprint !== run.fingerprint ||
-					fingerprint(configOf(receipt.config)) !== run.fingerprint ||
-					receipt.rankings.some(({ documents }) => documents.length > receipt.config.top_k)
+					fingerprint(configOfDomain(receipt.config)) !== run.fingerprint ||
+					receipt.rankings.some(({ documents }) => documents.length > 30)
 				)
 					throw new Error("Ranking receipt identity mismatch");
 				const { rankings, build_ms, index_bytes, index_sha256 } = receipt;
@@ -155,6 +213,10 @@ export function ragDomain(dataRoot: string): ExperimentDomain {
 					JSON.stringify(validation) !==
 						JSON.stringify({
 							...independent.metrics,
+							...(dense && {
+								relevant: relevantMetrics(independent.contributions, data.qrels),
+								peak_rss_kib: receipt.peak_rss_kib,
+							}),
 							build_ms,
 							index_bytes,
 							index_sha256,
@@ -169,7 +231,7 @@ export function ragDomain(dataRoot: string): ExperimentDomain {
 				await verifyRun(best);
 				return {
 					best_id: best.id,
-					protocol,
+					protocol: domainId,
 					fingerprint: best.fingerprint,
 					...identity,
 					evidence: await Promise.all(
@@ -180,8 +242,8 @@ export function ragDomain(dataRoot: string): ExperimentDomain {
 				};
 			};
 			const adapter: DurableExperimentAdapter = {
-				original: "BM25 v1",
-				config: JSON.stringify(baseline),
+				original: dense ? "Frozen SciFact BM25 / BGE / RRF" : "BM25 v1",
+				config: JSON.stringify(baseConfig),
 				evaluation: {
 					objectives: [{ metric: "ndcg10", direction: "maximize", min: 0, max: 1, target: null }],
 					validate(raw): Static<typeof validationSchema> {
@@ -197,11 +259,11 @@ export function ragDomain(dataRoot: string): ExperimentDomain {
 				trainingSteps: (): number => 0,
 				async prepare(id, content, rationale, signal, parameters): Promise<Candidate> {
 					signal.throwIfAborted();
-					let config: ReturnType<typeof configOf>;
+					let config: Config | HybridConfig;
 					try {
 						if (id !== "baseline" && !verified.has(content))
 							throw new Error("Parent experiment must reference previously verified development feedback");
-						config = configOf(id === "baseline" ? baseline : parameters);
+						config = configOfDomain(id === "baseline" ? baseConfig : parameters);
 					} catch (error) {
 						throw new ExperimentFailure(
 							"invalid_candidate",
@@ -218,12 +280,12 @@ export function ragDomain(dataRoot: string): ExperimentDomain {
 				},
 				async run(candidate, reservation: TrainingReservation, signal): Promise<RunResult> {
 					if (!adapter.recordCommand) throw new Error("SciFact requires a Durable task ledger");
-					const config = configOf(JSON.parse(candidate.config ?? ""));
+					const config = configOfDomain(JSON.parse(candidate.config ?? ""));
 					const op = {
 						id: ++sequence,
 						runId: candidate.id,
 						fingerprint: candidate.fingerprint,
-						script: "bm25_retrieval",
+						script: dense ? "scifact_retrieval" : "bm25_retrieval",
 						timeoutMs: budget.processTimeout(),
 						reservation,
 					};
@@ -241,8 +303,12 @@ export function ragDomain(dataRoot: string): ExperimentDomain {
 					let run: RunResult | undefined;
 					let failure: unknown;
 					try {
-						const { rankings, ...index } = retrieve(data.documents, data.queries, config, check);
+						const { rankings, ...index } =
+							dense && "strategy" in config
+								? retrieveHybrid(data, dense, config, check)
+								: retrieve(data.documents, data.queries, configOf(config), check);
 						const result = score(rankings, data.qrels, documentIds);
+						const resources = dense ? { peak_rss_kib: process.resourceUsage().maxRSS } : {};
 						check();
 						await json(root, receiptPath, {
 							dataset: identity.dataset,
@@ -250,6 +316,7 @@ export function ragDomain(dataRoot: string): ExperimentDomain {
 							config,
 							rankings,
 							...index,
+							...resources,
 						});
 						await json(root, `retrieval/${candidate.id}/contributions.json`, result.contributions);
 						run = {
@@ -258,6 +325,7 @@ export function ragDomain(dataRoot: string): ExperimentDomain {
 							run: receiptPath,
 							validation: {
 								...result.metrics,
+								...(dense && { relevant: relevantMetrics(result.contributions, data.qrels), ...resources }),
 								...index,
 								receipt_sha256: (await digest(root, receiptPath)).sha256,
 								proposal_sha256: (await digest(root, `retrieval/${candidate.id}/proposal.json`)).sha256,
